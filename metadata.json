@@ -1,6 +1,0 @@
-{
-  "name": "Odoo Excel Converter",
-  "description": "Automasi konversi file Excel Odoo dan SOT untuk update data status, item status, estimated received, dan remarks.",
-  "requestFramePermissions": [],
-  "majorCapabilities": []
-}

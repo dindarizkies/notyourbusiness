@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Odoo x POT Converter | Elo Karsa Utama</title>
+    <!-- Font Profesional -->
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+      :root {
+        --eku-blue: #0056b3; /* Warna identitas perusahaan biasanya biru/gelap */
+        --eku-accent: #34a853;
+        --bg-subtle: #f1f5f9;
+      }
+
+      body {
+        margin: 0;
+        font-family: 'Plus Jakarta Sans', sans-serif;
+        background-color: var(--bg-subtle);
+        background-image: radial-gradient(#cbd5e1 0.5px, transparent 0.5px);
+        background-size: 24px 24px; /* Efek dot grid biar kaya dashboard IT */
+      }
+
+      /* Navbar Style */
+      .navbar {
+        background: white;
+        padding: 1rem 2rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+      }
+
+      .company-logo {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .logo-icon {
+        background: var(--eku-blue);
+        color: white;
+        width: 40px;
+        height: 40px;
+        border-radius: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 800;
+        font-size: 1.2rem;
+      }
+
+      .company-name {
+        font-weight: 700;
+        color: #1e293b;
+        letter-spacing: -0.5px;
+      }
+
+      /* Container for React App */
+      #root {
+        min-height: calc(100vh - 80px);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 40px 20px;
+      }
+
+      footer {
+        text-align: center;
+        padding: 20px;
+        color: #94a3b8;
+        font-size: 0.85rem;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Header Branding -->
+    <nav class="navbar">
+      <div class="company-logo">
+        <div class="logo-icon">EKU</div>
+        <div class="company-name">PT ELO KARSA UTAMA</div>
+      </div>
+      <div style="font-size: 0.8rem; color: #64748b; font-weight: 600;">
+        IT SUPPORT SYSTEMS v2.0
+      </div>
+    </nav>
+
+    <!-- Main Content (React akan merender UI Form di sini) -->
+    <div id="root"></div>
+
+    <footer>
+      &copy; 2026 PT Elo Karsa Utama - Internal Automation Tool
+    </footer>
+
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

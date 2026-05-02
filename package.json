@@ -37,3 +37,19 @@
     "vite": "^6.2.3"
   }
 }
+
+{
+  "name": "automationbyelokarsa",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node dist/server.js"
+  },
+  "engines": {
+    "node": "20.x"
+  },
+  "dependencies": {
+    ...
+  }
+}

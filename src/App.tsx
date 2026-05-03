@@ -1,280 +1,133 @@
-import { useState, useRef } from 'react';
-import { Upload, FileSpreadsheet, Download, RefreshCw, CheckCircle2, AlertCircle, FileText } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import React, { useState } from 'react';
+import { Upload, FileSpreadsheet, CheckCircle2, Info, ArrowRight, Loader2 } from 'lucide-react';
 
-export default function App() {
-  const [odooFile, setOdooFile] = useState<File | null>(null);
-  const [potFile, setPotFile] = useState<File | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState(false);
-
-  const odooInputRef = useRef<HTMLInputElement>(null);
-  const potInputRef = useRef<HTMLInputElement>(null);
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>, type: 'odoo' | 'pot') => {
-    const file = e.target.files?.[0];
-    if (file) {
-      if (type === 'odoo') setOdooFile(file);
-      else setPotFile(file);
-      setError(null);
-      setSuccess(false);
-    }
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!odooFile || !potFile) {
-      setError("Harap pilih kedua file (Odoo & POT) terlebih dahulu.");
-      return;
-    }
-
-    setIsProcessing(true);
-    setError(null);
-    setSuccess(false);
-
-    const formData = new FormData();
-    formData.append('odooFile', odooFile);
-    formData.append('potFile', potFile);
-
-    try {
-      const response = await fetch('/api/convert', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'Terjadi kesalahan saat memproses file.');
-      }
-
-      // Download the result
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'SIAP_IMPORT_ODOO_FINAL.xlsx';
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-
-      setSuccess(true);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
+const OdooConverter = () => {
+  const [loading, setLoading] = useState(false);
 
   return (
-    <div className="min-h-screen bg-neutral-50 font-sans text-neutral-900 selection:bg-blue-100 selection:text-blue-900">
-      <div className="mx-auto max-w-4xl px-4 py-12 sm:px-6 lg:px-8">
-        {/* Header */}
-        <header className="mb-12 text-center">
-          <motion.div
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-4 py-1.5 text-sm font-medium text-blue-700 mb-4"
-          >
-            <RefreshCw className="h-4 w-4" />
-            <span>Odoo Automation</span>
-          </motion.div>
-          <motion.h1 
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.1 }}
-            className="text-4xl font-bold tracking-tight text-neutral-900 sm:text-5xl"
-          >
-            Odoo x POT Converter
-          </motion.h1>
-          <motion.p 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.2 }}
-            className="mx-auto mt-4 max-w-2xl text-lg text-neutral-600"
-          >
-            Automasi penggabungan data tarikan Odoo dengan data POT untuk persiapan import kembali ke Odoo.
-          </motion.p>
-        </header>
+    <div className="min-h-screen bg-[#f8fafc] text-slate-900 font-sans selection:bg-blue-100">
+      {/* Top Badge */}
+      <div className="flex justify-center pt-10">
+        <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-blue-50 border border-blue-100 text-blue-600 text-xs font-semibold tracking-wide uppercase shadow-sm">
+          <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+          Odoo Automation System
+        </span>
+      </div>
 
-        {/* Main Content */}
-        <main className="grid gap-8 lg:grid-cols-2">
-          {/* Form Side */}
-          <section className="rounded-2xl bg-white p-8 shadow-sm ring-1 ring-neutral-200/50">
-            <h2 className="mb-6 text-xl font-semibold flex items-center gap-2">
-              <Upload className="h-5 w-5 text-blue-600" />
-              Upload Files
-            </h2>
-            
-            <form onSubmit={handleSubmit} className="space-y-6">
-              {/* Odoo File Input */}
-              <div>
-                <label className="block text-sm font-medium text-neutral-700 mb-2">
+      {/* Hero Section */}
+      <header className="text-center px-6 py-10 max-w-3xl mx-auto">
+        <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight text-slate-900 mb-4">
+          Odoo <span className="text-blue-600">x</span> POT Converter
+        </h1>
+        <p className="text-lg text-slate-500 leading-relaxed">
+          Automasi penggabungan data tarikan Odoo dengan data POT. Siapkan file Anda dan biarkan sistem melakukan matching secara otomatis.
+        </p>
+      </header>
+
+      <main className="max-w-6xl mx-auto px-6 pb-20 grid grid-cols-1 lg:grid-cols-12 gap-8">
+        
+        {/* Left Column: Upload Area */}
+        <section className="lg:col-span-7 space-y-6">
+          <div className="bg-white rounded-3xl shadow-xl shadow-slate-200/50 border border-slate-100 p-8">
+            <div className="flex items-center gap-3 mb-8">
+              <div className="p-2 bg-blue-600 rounded-lg text-white">
+                <Upload size={20} />
+              </div>
+              <h2 className="text-xl font-bold">Upload Center</h2>
+            </div>
+
+            <div className="grid gap-6">
+              {/* Odoo Template Area */}
+              <div className="group relative">
+                <label className="block text-sm font-medium text-slate-700 mb-2 ml-1">
                   1. Template Tarikan Odoo (Template A)
                 </label>
-                <div 
-                  onClick={() => odooInputRef.current?.click()}
-                  className={`group relative flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-6 transition-all ${
-                    odooFile ? 'border-blue-200 bg-blue-50' : 'border-neutral-200 hover:border-blue-400 hover:bg-neutral-50'
-                  }`}
-                >
-                  <input 
-                    type="file" 
-                    ref={odooInputRef} 
-                    onChange={(e) => handleFileChange(e, 'odoo')}
-                    accept=".xlsx,.xls,.csv" 
-                    className="hidden" 
-                  />
-                  {odooFile ? (
-                    <div className="flex items-center gap-3">
-                      <FileSpreadsheet className="h-8 w-8 text-blue-600" />
-                      <div className="text-left">
-                        <p className="text-sm font-medium text-blue-900 truncate max-w-[150px]">{odooFile.name}</p>
-                        <p className="text-xs text-blue-600">{(odooFile.size / 1024).toFixed(1)} KB</p>
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      <FileSpreadsheet className="mb-2 h-8 w-8 text-neutral-400 group-hover:text-blue-500 transition-colors" />
-                      <p className="text-sm text-neutral-500">Pilih file Excel Odoo</p>
-                    </>
-                  )}
+                <div className="border-2 border-dashed border-slate-200 rounded-2xl p-10 flex flex-col items-center transition-all group-hover:border-blue-400 group-hover:bg-blue-50/30">
+                  <FileSpreadsheet className="text-slate-300 mb-4 group-hover:text-blue-500 transition-colors" size={48} />
+                  <p className="text-sm text-slate-500 mb-1">Seret file ke sini atau</p>
+                  <button className="text-sm font-semibold text-blue-600 hover:text-blue-700">Pilih file Excel Odoo</button>
+                  <input type="file" className="absolute inset-0 opacity-0 cursor-pointer" />
                 </div>
               </div>
 
-              {/* POT File Input */}
-              <div>
-                <label className="block text-sm font-medium text-neutral-700 mb-2">
+              {/* POT Data Area */}
+              <div className="group relative">
+                <label className="block text-sm font-medium text-slate-700 mb-2 ml-1">
                   2. Data POT Terbaru (Template B)
                 </label>
-                <div 
-                  onClick={() => potInputRef.current?.click()}
-                  className={`group relative flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-6 transition-all ${
-                    potFile ? 'border-blue-200 bg-blue-50' : 'border-neutral-200 hover:border-blue-400 hover:bg-neutral-50'
-                  }`}
-                >
-                  <input 
-                    type="file" 
-                    ref={potInputRef} 
-                    onChange={(e) => handleFileChange(e, 'pot')}
-                    accept=".xlsx,.xls" 
-                    className="hidden" 
-                  />
-                  {potFile ? (
-                    <div className="flex items-center gap-3">
-                      <FileText className="h-8 w-8 text-blue-600" />
-                      <div className="text-left">
-                        <p className="text-sm font-medium text-blue-900 truncate max-w-[150px]">{potFile.name}</p>
-                        <p className="text-xs text-blue-600">{(potFile.size / 1024).toFixed(1)} KB</p>
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      <FileText className="mb-2 h-8 w-8 text-neutral-400 group-hover:text-blue-500 transition-colors" />
-                      <p className="text-sm text-neutral-500">Pilih file Excel POT</p>
-                    </>
-                  )}
+                <div className="border-2 border-dashed border-slate-200 rounded-2xl p-10 flex flex-col items-center transition-all group-hover:border-blue-400 group-hover:bg-blue-50/30">
+                  <FileSpreadsheet className="text-slate-300 mb-4 group-hover:text-blue-500 transition-colors" size={48} />
+                  <p className="text-sm text-slate-500 mb-1">Seret file ke sini atau</p>
+                  <button className="text-sm font-semibold text-blue-600 hover:text-blue-700">Pilih file Excel POT</button>
+                  <input type="file" className="absolute inset-0 opacity-0 cursor-pointer" />
                 </div>
               </div>
 
-              <button
-                type="submit"
-                disabled={!odooFile || !potFile || isProcessing}
-                className="w-full relative flex items-center justify-center gap-2 overflow-hidden rounded-xl bg-blue-600 px-6 py-3.5 font-semibold text-white shadow-[0_4px_12px_rgba(37,99,235,0.2)] transition-all hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-neutral-300 disabled:shadow-none"
+              {/* Action Button */}
+              <button 
+                className="w-full mt-4 bg-slate-900 hover:bg-blue-600 text-white font-bold py-4 px-6 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-[0.98] shadow-lg shadow-blue-200"
+                onClick={() => setLoading(true)}
               >
-                {isProcessing ? (
-                  <>
-                    <RefreshCw className="h-5 w-5 animate-spin" />
-                    <span>Processing...</span>
-                  </>
-                ) : (
-                  <>
-                    <Download className="h-5 w-5" />
-                    <span>Convert & Download</span>
-                  </>
-                )}
+                {loading ? <Loader2 className="animate-spin" /> : <CheckCircle2 size={20} />}
+                {loading ? 'Processing Data...' : 'Convert & Download Result'}
               </button>
-            </form>
-
-            <AnimatePresence>
-              {error && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="mt-6 flex items-start gap-3 rounded-xl bg-red-50 p-4 text-sm text-red-700"
-                >
-                  <AlertCircle className="h-5 w-5 shrink-0" />
-                  <p>{error}</p>
-                </motion.div>
-              )}
-              {success && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="mt-6 flex items-start gap-3 rounded-xl bg-green-50 p-4 text-sm text-green-700"
-                >
-                  <CheckCircle2 className="h-5 w-5 shrink-0" />
-                  <div>
-                    <p className="font-semibold">Berhasil!</p>
-                    <p>File SIAP_IMPORT_ODOO_FINAL.xlsx telah terunduh.</p>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </section>
-
-          {/* Guide Side */}
-          <section className="flex flex-col gap-6">
-            <div className="rounded-2xl bg-neutral-900 p-8 text-neutral-100 shadow-xl">
-              <h3 className="mb-4 text-lg font-semibold text-white">Panduan Penggunaan</h3>
-              <ul className="space-y-4 text-sm text-neutral-400">
-                <li className="flex gap-3">
-                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-neutral-800 text-xs font-bold text-white ring-1 ring-neutral-700">1</span>
-                  <p>Siapkan file dari <span className="text-white font-medium">Odoo</span> (Template A) dan file <span className="text-white font-medium">POT</span> (Template B).</p>
-                </li>
-                <li className="flex gap-3">
-                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-neutral-800 text-xs font-bold text-white ring-1 ring-neutral-700">2</span>
-                  <p>Upload kedua file tersebut pada kolom yang tersedia di sebelah kiri.</p>
-                </li>
-                <li className="flex gap-3">
-                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-neutral-800 text-xs font-bold text-white ring-1 ring-neutral-700">3</span>
-                  <p>Klik tombol <span className="text-white font-medium">Convert & Download</span> untuk memulai proses matching data.</p>
-                </li>
-                <li className="flex gap-3">
-                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-neutral-800 text-xs font-bold text-white ring-1 ring-neutral-700">4</span>
-                  <p>Hasilnya berupa file Excel yang sudah berisi kolom: <span className="text-blue-400 font-mono">id, Status, Item Status, Estimated Received, dan Remarks</span>.</p>
-                </li>
-              </ul>
             </div>
+          </div>
+        </section>
 
-            <div className="rounded-2xl border border-neutral-200 bg-white p-6">
-              <h4 className="mb-3 text-sm font-semibold text-neutral-900">Informasi Teknis</h4>
-              <div className="space-y-3">
-                <div className="flex justify-between text-xs border-b border-neutral-100 pb-2">
-                  <span className="text-neutral-500">Logic Matching</span>
-                  <span className="font-medium text-neutral-900 text-right">PO + Material ID (Cleaned)</span>
-                </div>
-                <div className="flex justify-between text-xs border-b border-neutral-100 pb-2">
-                  <span className="text-neutral-500">Trim Product ID</span>
-                  <span className="font-medium text-neutral-900 text-right">Enabled (Remove prefix)</span>
-                </div>
-                <div className="flex justify-between text-xs border-b border-neutral-100 pb-2">
-                  <span className="text-neutral-500">POT Sheets</span>
-                  <span className="font-medium text-neutral-900 text-right">All sheets processed</span>
-                </div>
+        {/* Right Column: Guide & Technical */}
+        <aside className="lg:col-span-5 space-y-6">
+          {/* Guide Card */}
+          <div className="bg-slate-900 rounded-3xl p-8 text-white shadow-2xl">
+            <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
+              <Info size={20} className="text-blue-400" />
+              Panduan Penggunaan
+            </h3>
+            <ul className="space-y-6">
+              {[
+                "Siapkan file dari Odoo (Template A) dan POT (Template B).",
+                "Upload kedua file tersebut pada kolom Upload Center.",
+                "Klik tombol Convert & Download untuk proses matching.",
+                "Gunakan hasil file untuk import kembali ke sistem Odoo."
+              ].map((step, i) => (
+                <li key={i} className="flex gap-4 items-start">
+                  <span className="flex-shrink-0 w-7 h-7 rounded-full bg-blue-500/20 border border-blue-500/50 flex items-center justify-center text-xs font-bold text-blue-400">
+                    {i + 1}
+                  </span>
+                  <p className="text-sm text-slate-300 leading-relaxed">{step}</p>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          {/* Technical Info Card */}
+          <div className="bg-white rounded-3xl border border-slate-100 p-8 shadow-sm">
+            <h3 className="text-sm font-bold text-slate-900 uppercase tracking-widest mb-6">Informasi Teknis</h3>
+            <div className="space-y-4">
+              <div className="flex justify-between items-center py-3 border-b border-slate-50">
+                <span className="text-sm text-slate-500">Logic Matching</span>
+                <span className="text-sm font-mono font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded">PO + Material ID</span>
+              </div>
+              <div className="flex justify-between items-center py-3 border-b border-slate-50">
+                <span className="text-sm text-slate-500">Trim Product ID</span>
+                <span className="text-sm font-bold text-green-600">Enabled (Auto)</span>
+              </div>
+              <div className="flex justify-between items-center py-3">
+                <span className="text-sm text-slate-500">POT Sheets</span>
+                <span className="text-sm font-bold text-slate-700">All Sheets Processed</span>
               </div>
             </div>
-          </section>
-        </main>
+          </div>
+        </aside>
+      </main>
 
-        <footer className="mt-12 text-center text-xs text-neutral-400">
-          Built with React & Express • v1.0.0
-        </footer>
-      </div>
+      <footer className="text-center py-10 border-t border-slate-100">
+        <p className="text-xs text-slate-400">
+          Built with React 19 & Express • v1.1.0 • <span className="font-semibold text-slate-600">By Dinda Rizki Pangesti</span>
+        </p>
+      </footer>
     </div>
   );
-}
+};
 
+export default OdooConverter;

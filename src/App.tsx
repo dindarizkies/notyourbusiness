@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import { Upload, FileSpreadsheet, Download, RefreshCw, CheckCircle2, AlertCircle, FileText } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion'; // Pastikan pakai 'framer-motion' jika 'motion/react' error
+import { motion, AnimatePresence } from 'motion/react';
 
 export default function App() {
   const [odooFile, setOdooFile] = useState<File | null>(null);
@@ -48,6 +48,7 @@ export default function App() {
         throw new Error(data.error || 'Terjadi kesalahan saat memproses file.');
       }
 
+      // Download the result
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -69,7 +70,6 @@ export default function App() {
   return (
     <div className="min-h-screen bg-neutral-50 font-sans text-neutral-900 selection:bg-blue-100 selection:text-blue-900">
       <div className="mx-auto max-w-4xl px-4 py-12 sm:px-6 lg:px-8">
-        
         {/* Header */}
         <header className="mb-12 text-center">
           <motion.div
@@ -86,7 +86,7 @@ export default function App() {
             transition={{ delay: 0.1 }}
             className="text-4xl font-bold tracking-tight text-neutral-900 sm:text-5xl"
           >
-            Odoo <span className="text-blue-600 font-extrabold">x</span> POT Converter
+            Odoo x POT Converter
           </motion.h1>
           <motion.p 
             initial={{ opacity: 0 }}
@@ -100,7 +100,6 @@ export default function App() {
 
         {/* Main Content */}
         <main className="grid gap-8 lg:grid-cols-2">
-          
           {/* Form Side */}
           <section className="rounded-2xl bg-white p-8 shadow-sm ring-1 ring-neutral-200/50">
             <h2 className="mb-6 text-xl font-semibold flex items-center gap-2">
@@ -110,13 +109,13 @@ export default function App() {
             
             <form onSubmit={handleSubmit} className="space-y-6">
               {/* Odoo File Input */}
-              <div className="group">
+              <div>
                 <label className="block text-sm font-medium text-neutral-700 mb-2">
                   1. Template Tarikan Odoo (Template A)
                 </label>
                 <div 
                   onClick={() => odooInputRef.current?.click()}
-                  className={`relative flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-6 transition-all ${
+                  className={`group relative flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-6 transition-all ${
                     odooFile ? 'border-blue-200 bg-blue-50' : 'border-neutral-200 hover:border-blue-400 hover:bg-neutral-50'
                   }`}
                 >
@@ -130,8 +129,8 @@ export default function App() {
                   {odooFile ? (
                     <div className="flex items-center gap-3">
                       <FileSpreadsheet className="h-8 w-8 text-blue-600" />
-                      <div className="text-left overflow-hidden">
-                        <p className="text-sm font-medium text-blue-900 truncate max-w-[200px]">{odooFile.name}</p>
+                      <div className="text-left">
+                        <p className="text-sm font-medium text-blue-900 truncate max-w-[150px]">{odooFile.name}</p>
                         <p className="text-xs text-blue-600">{(odooFile.size / 1024).toFixed(1)} KB</p>
                       </div>
                     </div>
@@ -145,13 +144,13 @@ export default function App() {
               </div>
 
               {/* POT File Input */}
-              <div className="group">
+              <div>
                 <label className="block text-sm font-medium text-neutral-700 mb-2">
                   2. Data POT Terbaru (Template B)
                 </label>
                 <div 
                   onClick={() => potInputRef.current?.click()}
-                  className={`relative flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-6 transition-all ${
+                  className={`group relative flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-6 transition-all ${
                     potFile ? 'border-blue-200 bg-blue-50' : 'border-neutral-200 hover:border-blue-400 hover:bg-neutral-50'
                   }`}
                 >
@@ -165,8 +164,8 @@ export default function App() {
                   {potFile ? (
                     <div className="flex items-center gap-3">
                       <FileText className="h-8 w-8 text-blue-600" />
-                      <div className="text-left overflow-hidden">
-                        <p className="text-sm font-medium text-blue-900 truncate max-w-[200px]">{potFile.name}</p>
+                      <div className="text-left">
+                        <p className="text-sm font-medium text-blue-900 truncate max-w-[150px]">{potFile.name}</p>
                         <p className="text-xs text-blue-600">{(potFile.size / 1024).toFixed(1)} KB</p>
                       </div>
                     </div>
@@ -182,7 +181,7 @@ export default function App() {
               <button
                 type="submit"
                 disabled={!odooFile || !potFile || isProcessing}
-                className="w-full relative flex items-center justify-center gap-2 overflow-hidden rounded-xl bg-blue-600 px-6 py-3.5 font-semibold text-white shadow-[0_4px_12px_rgba(37,99,235,0.2)] transition-all hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-neutral-300 disabled:shadow-none"
+                className="w-full relative flex items-center justify-center gap-2 overflow-hidden rounded-xl bg-blue-600 px-6 py-3.5 font-semibold text-white shadow-[0_4px_12px_rgba(37,99,235,0.2)] transition-all hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-neutral-300 disabled:shadow-none"
               >
                 {isProcessing ? (
                   <>
@@ -234,33 +233,37 @@ export default function App() {
               <ul className="space-y-4 text-sm text-neutral-400">
                 <li className="flex gap-3">
                   <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-neutral-800 text-xs font-bold text-white ring-1 ring-neutral-700">1</span>
-                  <p>Siapkan file <span className="text-white font-medium">Odoo</span> (Template A) dan file <span className="text-white font-medium">POT</span> (Template B).</p>
+                  <p>Siapkan file dari <span className="text-white font-medium">Odoo</span> (Template A) dan file <span className="text-white font-medium">POT</span> (Template B).</p>
                 </li>
                 <li className="flex gap-3">
                   <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-neutral-800 text-xs font-bold text-white ring-1 ring-neutral-700">2</span>
-                  <p>Upload kedua file tersebut pada kolom yang tersedia.</p>
+                  <p>Upload kedua file tersebut pada kolom yang tersedia di sebelah kiri.</p>
                 </li>
                 <li className="flex gap-3">
                   <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-neutral-800 text-xs font-bold text-white ring-1 ring-neutral-700">3</span>
-                  <p>Klik tombol <span className="text-white font-medium">Convert & Download</span> untuk matching data.</p>
+                  <p>Klik tombol <span className="text-white font-medium">Convert & Download</span> untuk memulai proses matching data.</p>
+                </li>
+                <li className="flex gap-3">
+                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-neutral-800 text-xs font-bold text-white ring-1 ring-neutral-700">4</span>
+                  <p>Hasilnya berupa file Excel yang sudah berisi kolom: <span className="text-blue-400 font-mono">id, Status, Item Status, Estimated Received, dan Remarks</span>.</p>
                 </li>
               </ul>
             </div>
 
-            <div className="rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm">
+            <div className="rounded-2xl border border-neutral-200 bg-white p-6">
               <h4 className="mb-3 text-sm font-semibold text-neutral-900">Informasi Teknis</h4>
               <div className="space-y-3">
                 <div className="flex justify-between text-xs border-b border-neutral-100 pb-2">
                   <span className="text-neutral-500">Logic Matching</span>
-                  <span className="font-medium text-neutral-900">PO + Material ID (Cleaned)</span>
+                  <span className="font-medium text-neutral-900 text-right">PO + Material ID (Cleaned)</span>
                 </div>
                 <div className="flex justify-between text-xs border-b border-neutral-100 pb-2">
                   <span className="text-neutral-500">Trim Product ID</span>
-                  <span className="font-medium text-neutral-900 text-green-600 font-bold">Enabled</span>
+                  <span className="font-medium text-neutral-900 text-right">Enabled (Remove prefix)</span>
                 </div>
-                <div className="flex justify-between text-xs">
+                <div className="flex justify-between text-xs border-b border-neutral-100 pb-2">
                   <span className="text-neutral-500">POT Sheets</span>
-                  <span className="font-medium text-neutral-900">All sheets processed</span>
+                  <span className="font-medium text-neutral-900 text-right">All sheets processed</span>
                 </div>
               </div>
             </div>
@@ -268,8 +271,8 @@ export default function App() {
         </main>
 
         <footer className="mt-12 text-center text-xs text-neutral-400">
-          Built with React & Express • v1.1.0 • <span className="font-semibold">Dinda Rizki Pangesti</span>
-        </p>
+          Built with React & Express • v1.0.0
+        </footer>
       </div>
     </div>
   );

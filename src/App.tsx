@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { Upload, FileSpreadsheet, Download, RefreshCw, CheckCircle2, AlertCircle, Rocket } from 'lucide-react';
+import { Upload, FileText, Download, RefreshCw, CheckCircle2, AlertCircle, Rocket } from 'lucide-react';
 
 export default function App() {
   const [odooFile, setOdooFile] = useState<File | null>(null);
@@ -66,97 +66,112 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] font-sans text-slate-900">
-      <div className="mx-auto max-w-3xl px-6 py-16">
+    <div className="min-h-screen bg-[#F0F4F8] font-sans text-slate-800 flex items-center justify-center p-4">
+      <div className="max-w-5xl w-full space-y-8">
         
-        {/* Header Section */}
-        <div className="text-center mb-12">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white mb-6 shadow-lg shadow-blue-200">
-            <Rocket size={32} />
+        {/* Header - Berdasarkan image_fc6c08.png */}
+        <div className="text-center space-y-2">
+          <div className="flex items-center justify-center gap-2 text-[#4285F4] font-bold text-lg">
+            <Rocket size={20} className="fill-current" />
+            <span>Odoo Automation</span>
           </div>
-          <h1 className="text-3xl font-bold tracking-tight text-slate-900">
-            Converter Automasi Odoo
+          <h1 className="text-4xl font-extrabold text-[#344D67]">
+            Odoo x POT Converter
           </h1>
-          <p className="mt-3 text-slate-500">
-            Gabungkan data Odoo dan POT dengan satu klik untuk efisiensi kerja.
+          <p className="text-slate-500">
+            Gabungkan data tarikan Odoo dengan data POT secara otomatis.
           </p>
         </div>
 
-        {/* Card Section */}
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-          <form onSubmit={handleSubmit} className="p-8 space-y-8">
+        {/* UI/UX Container Dua Kolom */}
+        <div className="flex flex-col md:flex-row gap-0 rounded-3xl overflow-hidden shadow-2xl shadow-blue-100 border border-white">
+          
+          {/* Sisi Kiri: Form Upload (Clean White) */}
+          <div className="flex-[1.2] bg-white p-10">
+            <div className="flex items-center gap-2 mb-8 text-[#344D67] font-bold text-xl">
+              <span className="text-yellow-500">📁</span>
+              <h2>Upload Files</h2>
+            </div>
             
-            <div className="grid gap-6 md:grid-cols-2">
-              {/* Box 1 */}
-              <div className="space-y-2">
-                <label className="text-sm font-semibold text-slate-700">Template Odoo</label>
-                <div 
-                  onClick={() => odooInputRef.current?.click()}
-                  className={`flex flex-col items-center justify-center h-32 rounded-xl border-2 border-dashed cursor-pointer transition-colors ${
-                    odooFile ? 'bg-blue-50 border-blue-400' : 'bg-slate-50 border-slate-200 hover:border-blue-300'
-                  }`}
-                >
-                  <input type="file" ref={odooInputRef} onChange={(e) => handleFileChange(e, 'odoo')} className="hidden" accept=".xlsx,.xls" />
-                  <FileSpreadsheet className={`mb-2 ${odooFile ? 'text-blue-600' : 'text-slate-400'}`} />
-                  <span className="text-xs text-center px-2 font-medium truncate max-w-full">
-                    {odooFile ? odooFile.name : 'Pilih File Odoo'}
-                  </span>
+            <form onSubmit={handleSubmit} className="space-y-8">
+              <div className="space-y-3">
+                <label className="text-sm font-semibold text-slate-600">1. Template Tarikan Odoo (Template A)</label>
+                <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-xl border border-dashed border-slate-300 hover:border-blue-400 transition-colors">
+                  <input 
+                    type="file" 
+                    onChange={(e) => handleFileChange(e, 'odoo')} 
+                    className="text-sm text-slate-500 file:mr-4 file:py-1 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-white file:text-slate-700 file:shadow-sm hover:file:bg-slate-100 cursor-pointer w-full" 
+                  />
                 </div>
               </div>
 
-              {/* Box 2 */}
-              <div className="space-y-2">
-                <label className="text-sm font-semibold text-slate-700">Data POT</label>
-                <div 
-                  onClick={() => potInputRef.current?.click()}
-                  className={`flex flex-col items-center justify-center h-32 rounded-xl border-2 border-dashed cursor-pointer transition-colors ${
-                    potFile ? 'bg-blue-50 border-blue-400' : 'bg-slate-50 border-slate-200 hover:border-blue-300'
-                  }`}
-                >
-                  <input type="file" ref={potInputRef} onChange={(e) => handleFileChange(e, 'pot')} className="hidden" accept=".xlsx,.xls" />
-                  <FileSpreadsheet className={`mb-2 ${potFile ? 'text-blue-600' : 'text-slate-400'}`} />
-                  <span className="text-xs text-center px-2 font-medium truncate max-w-full">
-                    {potFile ? potFile.name : 'Pilih File POT'}
-                  </span>
+              <div className="space-y-3">
+                <label className="text-sm font-semibold text-slate-600">2. Data POT Terbaru (Template B)</label>
+                <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-xl border border-dashed border-slate-300 hover:border-blue-400 transition-colors">
+                  <input 
+                    type="file" 
+                    onChange={(e) => handleFileChange(e, 'pot')} 
+                    className="text-sm text-slate-500 file:mr-4 file:py-1 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-white file:text-slate-700 file:shadow-sm hover:file:bg-slate-100 cursor-pointer w-full" 
+                  />
                 </div>
               </div>
-            </div>
 
-            <button
-              type="submit"
-              disabled={!odooFile || !potFile || isProcessing}
-              className="w-full flex items-center justify-center gap-3 bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl shadow-md transition-all disabled:bg-slate-300 disabled:shadow-none"
-            >
-              {isProcessing ? (
-                <>
-                  <RefreshCw className="animate-spin" size={20} />
-                  <span>Sedang Memproses...</span>
-                </>
-              ) : (
-                <>
-                  <Download size={20} />
-                  <span>Proses & Download Hasil</span>
-                </>
+              <button
+                type="submit"
+                disabled={!odooFile || !potFile || isProcessing}
+                className="w-full bg-[#4285F4] hover:bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg shadow-blue-100 transition-all flex items-center justify-center gap-2 disabled:bg-slate-300"
+              >
+                {isProcessing ? <RefreshCw className="animate-spin" size={20} /> : <Download size={20} />}
+                <span>Convert & Download Results</span>
+              </button>
+
+              {/* Status Notifikasi */}
+              {(error || success) && (
+                <div className={`p-4 rounded-lg text-sm flex items-center gap-2 ${error ? 'bg-red-50 text-red-600' : 'bg-emerald-50 text-emerald-600'}`}>
+                  {error ? <AlertCircle size={16} /> : <CheckCircle2 size={16} />}
+                  <span>{error || 'Berhasil! File hasil konversi telah diunduh.'}</span>
+                </div>
               )}
-            </button>
-          </form>
+            </form>
+          </div>
 
-          {/* Alert Status */}
-          {(error || success) && (
-            <div className={`p-4 text-sm flex items-center gap-3 ${error ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
-              {error ? <AlertCircle size={18} /> : <CheckCircle2 size={18} />}
-              <span>{error || 'Berhasil! File hasil konversi telah diunduh.'}</span>
+          {/* Sisi Kanan: Panduan (Dark Blue/Grey) */}
+          <div className="flex-1 bg-[#1A2635] p-10 text-slate-300">
+            <div className="flex items-center gap-2 mb-8 text-[#4285F4] font-bold text-xl">
+              <span>📝</span>
+              <h2 className="text-white">Panduan Penggunaan</h2>
             </div>
-          )}
+            
+            <ul className="space-y-8">
+              <li className="flex gap-4">
+                <span className="flex-shrink-0 w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-sm font-bold border border-slate-700 text-white">1</span>
+                <p className="text-sm leading-relaxed pt-1">Siapkan file dari <span className="text-white font-bold">Odoo</span> dan file <span className="text-white font-bold">POT</span> dalam format .xlsx.</p>
+              </li>
+              <li className="flex gap-4">
+                <span className="flex-shrink-0 w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-sm font-bold border border-slate-700 text-white">2</span>
+                <p className="text-sm leading-relaxed pt-1">Upload kedua file pada kolom yang tersedia di sebelah kiri.</p>
+              </li>
+              <li className="flex gap-4 pb-4 border-b border-slate-700/50">
+                <span className="flex-shrink-0 w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-sm font-bold border border-slate-700 text-white">3</span>
+                <p className="text-sm leading-relaxed pt-1">Klik tombol <span className="text-[#4285F4] font-bold">Convert</span> dan sistem akan mencocokkan data berdasarkan PO & Material ID.</p>
+              </li>
+            </ul>
+
+            {/* Labels di bagian bawah sisi kanan */}
+            <div className="mt-10 flex flex-wrap gap-2">
+              <span className="px-3 py-1.5 bg-slate-800 rounded-lg text-[10px] font-mono border border-slate-700 uppercase tracking-wider text-slate-400">Logic: PO + Material ID</span>
+              <span className="px-3 py-1.5 bg-slate-800 rounded-lg text-[10px] font-mono border border-slate-700 uppercase tracking-wider text-slate-400">Environment: Production</span>
+            </div>
+          </div>
+
         </div>
 
-        {/* Footer */}
-        <div className="mt-12 text-center">
-          <p className="text-xs text-slate-400 font-medium tracking-widest uppercase">
+        {/* Footer identitas pembuat */}
+        <div className="text-center">
+          <p className="text-slate-400 text-xs font-medium uppercase tracking-widest">
             Developed by Dinda Rizki Pangesti
           </p>
         </div>
-
       </div>
     </div>
   );

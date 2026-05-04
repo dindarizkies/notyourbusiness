@@ -259,7 +259,7 @@ export default function App() {
           <div className="flex flex-col items-center gap-3">
              <div className="h-px w-16 bg-slate-200" />
              <p className="text-[10px] font-bold uppercase tracking-[0.4em] text-slate-400">
-                Serve You Better - Created By IT Team ELokarsa • 2026
+                Serving You Better - Created By IT Team ELokarsa • 2026
              </p>
           </div>
         </footer>

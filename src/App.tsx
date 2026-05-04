@@ -115,7 +115,7 @@ export default function App() {
             Odoo x POT <span className="text-sky-600">Smart-Sync</span>
           </motion.h1>
           <p className="mt-4 max-w-2xl text-lg text-slate-500 leading-relaxed">
-            Platform automasi data logistik untuk sinkronisasi tarikan <span className="font-semibold text-slate-700">Odoo</span> dengan basis data <span className="font-semibold text-slate-700">POT</span> secara instan.
+            Platform automasi data order pembelian untuk sinkronisasi tarikan <span className="font-semibold text-slate-700">Odoo</span> dengan basis data <span className="font-semibold text-slate-700">POT</span> secara instan.
           </p>
         </header>
 
@@ -244,7 +244,7 @@ export default function App() {
                   </div>
                   <div className="flex gap-3 text-xs font-medium text-slate-400">
                     <span className="text-sky-400">03</span>
-                    <p>Sistem akan memvalidasi <span className="text-white font-mono">id, status,</span> dan <span className="text-white font-mono">remarks</span>.</p>
+                    <p>Sistem akan memvalidasi <span className="text-white font-mono">id, status,estimasi received </span> dan <span className="text-white font-mono">remarks</span>.</p>
                   </div>
                 </div>
                </div>

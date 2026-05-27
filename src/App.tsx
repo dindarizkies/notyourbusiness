@@ -1,269 +1,479 @@
-import { useState, useRef } from 'react';
-import { Upload, FileSpreadsheet, Download, RefreshCw, CheckCircle2, AlertCircle, FileText, Rocket, ShieldCheck, Zap } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { useState, useRef, useCallback } from 'react';
+import * as XLSX from 'xlsx';
 
-export default function App() {
-  const [odooFile, setOdooFile] = useState<File | null>(null);
-  const [potFile, setPotFile] = useState<File | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState(false);
+// ─── Types ────────────────────────────────────────────────────────────────────
+interface ProcessingLog {
+  type: 'info' | 'warn' | 'success' | 'error';
+  msg: string;
+}
 
-  const odooInputRef = useRef<HTMLInputElement>(null);
-  const potInputRef = useRef<HTMLInputElement>(null);
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const findCol = (keys: string[], candidates: string[]): string | undefined => {
+  const lk = keys.map(k => k.toLowerCase().trim());
+  for (const c of candidates) {
+    const idx = lk.indexOf(c.toLowerCase().trim());
+    if (idx !== -1) return keys[idx];
+  }
+  for (const c of candidates) {
+    const found = keys.find(k => k.toLowerCase().includes(c.toLowerCase()));
+    if (found) return found;
+  }
+  return undefined;
+};
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>, type: 'odoo' | 'pot') => {
-    const file = e.target.files?.[0];
-    if (file) {
-      if (type === 'odoo') setOdooFile(file);
-      else setPotFile(file);
-      setError(null);
-      setSuccess(false);
+const clean = (val: any): string =>
+  String(val ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+const extractPoKey = (val: string): string => {
+  if (!val) return '';
+  const m = val.match(/purchase_order_(\d+)/i);
+  return m ? m[1] : val.trim();
+};
+
+const extractProductKey = (val: string): string => {
+  if (!val) return '';
+  if (val.startsWith('__export__')) {
+    const m = val.match(/product_product_(\d+)/i);
+    return m ? m[1] : val;
+  }
+  const bracket = val.match(/^\[([^\]]+)\]/);
+  if (bracket) return bracket[1].trim();
+  if (val.length > 3 && val[2] === ' ') return val.substring(3).trim();
+  return val.trim();
+};
+
+const readFileAsBuffer = (file: File): Promise<ArrayBuffer> =>
+  new Promise((res, rej) => {
+    const reader = new FileReader();
+    reader.onload = e => res(e.target!.result as ArrayBuffer);
+    reader.onerror = () => rej(new Error('Gagal membaca file'));
+    reader.readAsArrayBuffer(file);
+  });
+
+// ─── Core conversion logic ────────────────────────────────────────────────────
+async function convertFiles(
+  odooFile: File,
+  potFile: File,
+  log: (l: ProcessingLog) => void
+): Promise<Blob> {
+  // Read Odoo
+  const odrBuf = await readFileAsBuffer(odooFile);
+  const wbOdoo = XLSX.read(odrBuf, { type: 'array' });
+  const dfOdoo: any[] = XLSX.utils.sheet_to_json(wbOdoo.Sheets[wbOdoo.SheetNames[0]]);
+
+  if (dfOdoo.length === 0) throw new Error('File Odoo kosong atau tidak bisa dibaca.');
+
+  const odooKeys = Object.keys(dfOdoo[0]);
+  const colId      = findCol(odooKeys, ['external id', 'external_id', 'id']);
+  const colOrder   = findCol(odooKeys, ['order_id', 'order reference', 'order_reference', 'purchase order', 'po number', 'no po']);
+  const colProduct = findCol(odooKeys, ['product_id', 'product', 'product name', 'material', 'item', 'sku']);
+
+  log({ type: 'info', msg: `Odoo: ${dfOdoo.length} baris | id="${colId}" | order="${colOrder}" | product="${colProduct}"` });
+
+  if (!colOrder || !colProduct)
+    throw new Error(`Kolom Odoo tidak dikenali. Kolom tersedia: [${odooKeys.join(', ')}]. Butuh kolom PO & Produk.`);
+
+  const sampleProd = String(dfOdoo[0][colProduct] ?? '');
+  const isExtId = sampleProd.startsWith('__export__');
+  if (isExtId) log({ type: 'warn', msg: 'Kolom Product berformat External ID — matching via ID numerik internal.' });
+
+  const processedOdoo = dfOdoo.map(row => ({
+    ...row,
+    _po:  clean(extractPoKey(String(row[colOrder!] ?? ''))),
+    _mat: clean(extractProductKey(String(row[colProduct!] ?? ''))),
+  }));
+
+  // Read POT
+  const potBuf = await readFileAsBuffer(potFile);
+  const wbPot  = XLSX.read(potBuf, { type: 'array' });
+  const potDB: Record<string, any> = {};
+  let potRows = 0;
+
+  for (const sheetName of wbPot.SheetNames) {
+    const dfPot: any[] = XLSX.utils.sheet_to_json(wbPot.Sheets[sheetName]);
+    if (dfPot.length === 0) continue;
+
+    const pk   = Object.keys(dfPot[0]);
+    const c_po  = findCol(pk, ['purchase order number', 'purchase order', 'po number', 'no po', 'nomor po', 'order_id']);
+    const c_mat = findCol(pk, ['material', 'material id', 'part number', 'product', 'item', 'sku', 'kode']);
+    if (!c_po || !c_mat) { log({ type: 'warn', msg: `Sheet "${sheetName}": kolom PO/Material tidak ditemukan, dilewati.` }); continue; }
+
+    const c_status = findCol(pk, ['status']);
+    const c_istat  = findCol(pk, ['item status', 'item_status']);
+    const c_est    = findCol(pk, ['estimated received by dealers (date)_details', 'estimated received', 'eta', 'estimated date']);
+    const c_rem    = findCol(pk, ['remarks', 'catatan', 'keterangan', 'note', 'notes']);
+
+    log({ type: 'info', msg: `Sheet "${sheetName}": ${dfPot.length} baris | po="${c_po}" | mat="${c_mat}"` });
+
+    for (const row of dfPot) {
+      const kp  = clean(String(row[c_po!]  ?? ''));
+      const km  = clean(String(row[c_mat!] ?? ''));
+      if (!kp && !km) continue;
+
+      const val = {
+        status:      c_status ? (row[c_status] ?? '') : '',
+        item_status: c_istat  ? (row[c_istat]  ?? '') : '',
+        est:         c_est    ? (row[c_est]     ?? '') : '',
+        remarks:     c_rem    ? (row[c_rem]     ?? '') : '',
+      };
+      const kFull = `${kp}__${km}`;
+      const kMat  = `MAT_${km}`;
+      const kPo   = `PO_${kp}`;
+      if (!potDB[kFull]) potDB[kFull] = val;
+      if (!potDB[kMat])  potDB[kMat]  = val;
+      if (!potDB[kPo])   potDB[kPo]   = val;
+      potRows++;
     }
-  };
+  }
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!odooFile || !potFile) {
-      setError("Harap pilih kedua file (Odoo & POT) terlebih dahulu.");
-      return;
-    }
+  log({ type: 'info', msg: `POT: ${potRows} baris diindeks, ${Object.keys(potDB).length} keys` });
+  if (potRows === 0) throw new Error('File POT kosong atau format kolom tidak dikenali.');
 
-    setIsProcessing(true);
-    setError(null);
-    setSuccess(false);
+  // Match
+  let mFull = 0, mMat = 0, mPo = 0, noM = 0;
+  const finalData = processedOdoo
+    .map(row => {
+      const kFull = `${row._po}__${row._mat}`;
+      const kMat  = `MAT_${row._mat}`;
+      const kPo   = `PO_${row._po}`;
+      let pv = potDB[kFull]; if (pv) { mFull++; }
+      else { pv = potDB[kMat]; if (pv) { mMat++; } else { pv = potDB[kPo]; if (pv) { mPo++; } else { noM++; return null; } } }
+      return {
+        'id':                 colId ? (row[colId] ?? '') : '',
+        'status':             pv.status,
+        'item_status':        pv.item_status,
+        'estimated_received': pv.est,
+        'remarks':            pv.remarks,
+      };
+    })
+    .filter(Boolean);
 
-    const formData = new FormData();
-    formData.append('odooFile', odooFile);
-    formData.append('potFile', potFile);
+  log({ type: 'info', msg: `Match: PO+Mat=${mFull} | Mat=${mMat} | PO=${mPo} | Tidak cocok=${noM}` });
+  log({ type: 'success', msg: `${finalData.length} baris berhasil diproses!` });
 
-    try {
-      const response = await fetch('/api/convert', {
-        method: 'POST',
-        body: formData,
-      });
+  if (finalData.length === 0) {
+    const hint = isExtId
+      ? ' TIP: Export ulang Odoo dengan kolom Product dalam format Display Name (bukan External ID).'
+      : '';
+    throw new Error(`Tidak ada data yang cocok antara Odoo (${processedOdoo.length} baris) dan POT (${potRows} baris).${hint}`);
+  }
 
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'Terjadi kesalahan saat memproses file.');
-      }
+  const wbOut = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wbOut, XLSX.utils.json_to_sheet(finalData), 'SIAP_IMPORT');
+  const outBuf = XLSX.write(wbOut, { type: 'array', bookType: 'xlsx' });
+  return new Blob([outBuf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
 
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'SIAP_IMPORT_ODOO_FINAL.xlsx';
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
+// ─── Dropzone component ───────────────────────────────────────────────────────
+function Dropzone({
+  label, sublabel, file, accept, onFile, icon,
+}: {
+  label: string; sublabel: string; file: File | null;
+  accept: string; onFile: (f: File) => void; icon: React.ReactNode;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  const [drag, setDrag] = useState(false);
 
-      setSuccess(true);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault(); setDrag(false);
+    const f = e.dataTransfer.files?.[0];
+    if (f) onFile(f);
+  }, [onFile]);
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] font-sans text-slate-900 selection:bg-sky-100">
-      {/* Dekorasi Latar Belakang Teknis */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-0 right-0 w-1/2 h-1/2 bg-gradient-to-br from-sky-100/50 to-transparent rounded-full blur-3xl -translate-y-1/2 translate-x-1/4" />
-        <div className="absolute bottom-0 left-0 w-1/3 h-1/3 bg-gradient-to-tr from-blue-50 to-transparent rounded-full blur-3xl translate-y-1/4 -translate-x-1/4" />
+    <div className="dz-wrap">
+      <p className="dz-label">{label}</p>
+      <div
+        className={`dz${drag ? ' dz--drag' : ''}${file ? ' dz--filled' : ''}`}
+        onClick={() => ref.current?.click()}
+        onDragOver={e => { e.preventDefault(); setDrag(true); }}
+        onDragLeave={() => setDrag(false)}
+        onDrop={onDrop}
+      >
+        <input ref={ref} type="file" accept={accept} className="dz-input"
+          onChange={e => { const f = e.target.files?.[0]; if (f) onFile(f); }} />
+        <span className="dz-icon">{icon}</span>
+        {file
+          ? <><span className="dz-fname">{file.name}</span><span className="dz-fsize">{(file.size/1024).toFixed(1)} KB</span></>
+          : <><span className="dz-prompt">Klik atau drag file di sini</span><span className="dz-sub">{sublabel}</span></>
+        }
       </div>
+    </div>
+  );
+}
 
-      <div className="relative mx-auto max-w-5xl px-6 py-12">
-        {/* Header Section */}
-        <header className="mb-16 flex flex-col items-center text-center">
-          <motion.div 
-            initial={{ y: 20, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            className="relative mb-6"
-          >
-            {/* ROCKET MERAH MENYALA */}
-            <div className="relative z-10 flex h-20 w-20 items-center justify-center rounded-2xl bg-white shadow-xl ring-1 ring-slate-200">
-              <Rocket className="h-10 w-10 text-red-500 fill-red-50" />
-              {/* Efek Api Menyala Bawah */}
-              <motion.div 
-                animate={{ opacity: [0.4, 1, 0.4], scale: [1, 1.2, 1] }}
-                transition={{ repeat: Infinity, duration: 1.5 }}
-                className="absolute -bottom-2 h-4 w-6 bg-orange-500 blur-md rounded-full"
-              />
-            </div>
-            {/* Glow di belakang roket */}
-            <div className="absolute inset-0 bg-red-400 blur-2xl opacity-20 scale-150" />
-          </motion.div>
+// ─── Main App ─────────────────────────────────────────────────────────────────
+export default function App() {
+  const [odooFile, setOdooFile] = useState<File | null>(null);
+  const [potFile,  setPotFile]  = useState<File | null>(null);
+  const [status,   setStatus]   = useState<'idle'|'processing'|'done'|'error'>('idle');
+  const [logs,     setLogs]     = useState<ProcessingLog[]>([]);
+  const [errMsg,   setErrMsg]   = useState('');
 
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.2 }}
-            className="inline-flex items-center gap-2 rounded-full bg-sky-50 px-4 py-1 text-xs font-bold uppercase tracking-widest text-sky-700 border border-sky-100 mb-4"
-          >
-            <Zap className="h-3 w-3 fill-sky-700" />
-            <span>High-Speed Matching Engine</span>
-          </motion.div>
+  const addLog = (l: ProcessingLog) => setLogs(prev => [...prev, l]);
 
-          <motion.h1 
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.3 }}
-            className="text-4xl font-extrabold tracking-tight text-slate-900 sm:text-5xl"
-          >
-            Odoo x POT <span className="text-sky-600">Smart-Sync</span>
-          </motion.h1>
-          <p className="mt-4 max-w-2xl text-lg text-slate-500 leading-relaxed">
-            Platform automasi data order pembelian untuk sinkronisasi tarikan <span className="font-semibold text-slate-700">Odoo</span> dengan basis data <span className="font-semibold text-slate-700">POT</span> secara instan.
+  const handleConvert = async () => {
+    if (!odooFile || !potFile) return;
+    setStatus('processing'); setLogs([]); setErrMsg('');
+    try {
+      const blob = await convertFiles(odooFile, potFile, addLog);
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url; a.download = 'SIAP_IMPORT_ODOO_FINAL.xlsx';
+      document.body.appendChild(a); a.click();
+      URL.revokeObjectURL(url); document.body.removeChild(a);
+      setStatus('done');
+    } catch (e: any) {
+      setErrMsg(e.message); setStatus('error');
+      addLog({ type: 'error', msg: e.message });
+    }
+  };
+
+  const ready = !!odooFile && !!potFile && status !== 'processing';
+
+  return (
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap');
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+          --bg:      #0b0f1a;
+          --surface: #111827;
+          --border:  #1f2d45;
+          --accent:  #3b82f6;
+          --accent2: #06b6d4;
+          --green:   #10b981;
+          --yellow:  #f59e0b;
+          --red:     #ef4444;
+          --text:    #e2e8f0;
+          --muted:   #64748b;
+          --mono:    'DM Mono', monospace;
+          --sans:    'Syne', sans-serif;
+        }
+
+        body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; }
+
+        /* Grid bg */
+        body::before {
+          content: '';
+          position: fixed; inset: 0; z-index: 0;
+          background-image:
+            linear-gradient(rgba(59,130,246,.04) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(59,130,246,.04) 1px, transparent 1px);
+          background-size: 40px 40px;
+          pointer-events: none;
+        }
+
+        .app { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding: 48px 24px 80px; }
+
+        /* Header */
+        .header { text-align: center; margin-bottom: 56px; }
+        .badge {
+          display: inline-flex; align-items: center; gap: 6px;
+          background: rgba(59,130,246,.12); border: 1px solid rgba(59,130,246,.25);
+          color: var(--accent2); font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
+          padding: 5px 14px; border-radius: 100px; margin-bottom: 20px; text-transform: uppercase;
+        }
+        .badge-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent2); animation: pulse 2s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+        .title { font-size: clamp(32px, 6vw, 52px); font-weight: 800; letter-spacing: -.02em; line-height: 1.1; }
+        .title em { font-style: normal; color: var(--accent); }
+        .subtitle { margin-top: 14px; color: var(--muted); font-size: 15px; line-height: 1.6; }
+
+        /* Layout */
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+
+        /* Card */
+        .card {
+          background: var(--surface); border: 1px solid var(--border);
+          border-radius: 16px; padding: 28px;
+        }
+        .card-title {
+          font-size: 11px; font-family: var(--mono); letter-spacing: .12em;
+          color: var(--muted); text-transform: uppercase; margin-bottom: 20px;
+        }
+
+        /* Dropzone */
+        .dz-wrap { margin-bottom: 16px; }
+        .dz-label { font-size: 12px; color: var(--muted); font-family: var(--mono); margin-bottom: 8px; letter-spacing:.06em; }
+        .dz {
+          position: relative; border: 1.5px dashed var(--border); border-radius: 12px;
+          padding: 20px 16px; cursor: pointer; transition: all .2s;
+          display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center;
+        }
+        .dz:hover, .dz--drag { border-color: var(--accent); background: rgba(59,130,246,.06); }
+        .dz--filled { border-style: solid; border-color: rgba(59,130,246,.4); background: rgba(59,130,246,.05); }
+        .dz-input { display: none; }
+        .dz-icon { font-size: 28px; line-height: 1; margin-bottom: 4px; }
+        .dz-prompt { font-size: 13px; color: var(--text); font-weight: 600; }
+        .dz-sub { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+        .dz-fname { font-size: 12px; color: var(--accent2); font-family: var(--mono); word-break: break-all; font-weight: 500; }
+        .dz-fsize { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+
+        /* Button */
+        .btn {
+          width: 100%; padding: 15px; border: none; border-radius: 12px; cursor: pointer;
+          font-family: var(--sans); font-size: 14px; font-weight: 700; letter-spacing: .04em;
+          text-transform: uppercase; transition: all .2s; margin-top: 8px;
+          display: flex; align-items: center; justify-content: center; gap: 10px;
+        }
+        .btn-primary {
+          background: linear-gradient(135deg, var(--accent), var(--accent2));
+          color: #fff; box-shadow: 0 4px 24px rgba(59,130,246,.3);
+        }
+        .btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 32px rgba(59,130,246,.4); }
+        .btn:disabled { opacity: .4; cursor: not-allowed; transform: none !important; }
+        .spin { animation: spin .8s linear infinite; display: inline-block; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Status */
+        .status-success, .status-error {
+          margin-top: 14px; padding: 12px 16px; border-radius: 10px;
+          font-size: 13px; display: flex; align-items: flex-start; gap: 10px;
+        }
+        .status-success { background: rgba(16,185,129,.1); border: 1px solid rgba(16,185,129,.25); color: var(--green); }
+        .status-error   { background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.2); color: var(--red); }
+
+        /* Log panel */
+        .log-panel {
+          background: #070c14; border: 1px solid var(--border); border-radius: 12px;
+          padding: 16px; font-family: var(--mono); font-size: 11.5px; line-height: 1.7;
+          max-height: 260px; overflow-y: auto;
+        }
+        .log-panel:empty::after { content: 'Log akan muncul saat proses berjalan...'; color: var(--muted); }
+        .log-info    { color: #94a3b8; }
+        .log-warn    { color: var(--yellow); }
+        .log-success { color: var(--green); }
+        .log-error   { color: var(--red); }
+
+        /* Info card */
+        .info-item { display: flex; gap: 12px; margin-bottom: 14px; align-items: flex-start; }
+        .info-num {
+          flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%;
+          background: rgba(59,130,246,.15); border: 1px solid rgba(59,130,246,.3);
+          color: var(--accent); font-family: var(--mono); font-size: 10px;
+          display: flex; align-items: center; justify-content: center; font-weight: 700; margin-top: 1px;
+        }
+        .info-text { font-size: 13px; color: var(--muted); line-height: 1.6; }
+        .info-text strong { color: var(--text); }
+
+        /* Spec table */
+        .spec { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--mono); }
+        .spec td { padding: 8px 0; border-bottom: 1px solid var(--border); }
+        .spec td:first-child { color: var(--muted); }
+        .spec td:last-child { color: var(--accent2); text-align: right; }
+        .spec tr:last-child td { border-bottom: none; }
+
+        .footer { text-align: center; margin-top: 56px; font-size: 11px; color: var(--muted); font-family: var(--mono); letter-spacing: .08em; }
+      `}</style>
+
+      <div className="app">
+        <header className="header">
+          <div className="badge"><span className="badge-dot" />Frontend Processing Engine</div>
+          <h1 className="title">Odoo × POT <em>Smart-Sync</em></h1>
+          <p className="subtitle">
+            Automasi sinkronisasi tarikan Odoo dengan data POT.<br />
+            Semua proses berjalan langsung di browser — tidak perlu server.
           </p>
         </header>
 
-        <main className="grid gap-8 lg:grid-cols-12 items-start">
-          {/* Bagian Upload (Kiri) */}
-          <section className="lg:col-span-7 rounded-3xl bg-white p-8 shadow-[0_20px_50px_rgba(0,0,0,0.04)] border border-slate-100">
-            <div className="flex items-center gap-3 mb-8">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-sky-600 text-white">
-                <Upload className="h-5 w-5" />
-              </div>
-              <h2 className="text-xl font-bold text-slate-800 tracking-tight">Data Injection</h2>
-            </div>
-            
-            <form onSubmit={handleSubmit} className="space-y-8">
-              <div className="grid gap-6 sm:grid-cols-2">
-                {/* Odoo Input */}
-                <div className="space-y-3">
-                  <label className="text-xs font-bold uppercase tracking-wider text-slate-400 ml-1">Template Odoo</label>
-                  <div 
-                    onClick={() => odooInputRef.current?.click()}
-                    className={`group relative cursor-pointer rounded-2xl border-2 border-dashed p-6 text-center transition-all ${
-                      odooFile ? 'border-sky-500 bg-sky-50/50' : 'border-slate-200 hover:border-sky-400 hover:bg-slate-50'
-                    }`}
-                  >
-                    <input type="file" ref={odooInputRef} onChange={(e) => handleFileChange(e, 'odoo')} accept=".xlsx,.xls,.csv" className="hidden" />
-                    <FileSpreadsheet className={`mx-auto mb-3 h-10 w-10 ${odooFile ? 'text-sky-600' : 'text-slate-300 group-hover:text-sky-500'}`} />
-                    <p className={`text-sm font-semibold truncate px-2 ${odooFile ? 'text-sky-900' : 'text-slate-500'}`}>
-                      {odooFile ? odooFile.name : 'Select Odoo File'}
-                    </p>
-                  </div>
-                </div>
+        <div className="grid">
+          {/* Left: Upload */}
+          <div>
+            <div className="card">
+              <p className="card-title">// Upload Files</p>
 
-                {/* POT Input */}
-                <div className="space-y-3">
-                  <label className="text-xs font-bold uppercase tracking-wider text-slate-400 ml-1">Template POT</label>
-                  <div 
-                    onClick={() => potInputRef.current?.click()}
-                    className={`group relative cursor-pointer rounded-2xl border-2 border-dashed p-6 text-center transition-all ${
-                      potFile ? 'border-sky-500 bg-sky-50/50' : 'border-slate-200 hover:border-sky-400 hover:bg-slate-50'
-                    }`}
-                  >
-                    <input type="file" ref={potInputRef} onChange={(e) => handleFileChange(e, 'pot')} accept=".xlsx,.xls" className="hidden" />
-                    <FileText className={`mx-auto mb-3 h-10 w-10 ${potFile ? 'text-sky-600' : 'text-slate-300 group-hover:text-sky-500'}`} />
-                    <p className={`text-sm font-semibold truncate px-2 ${potFile ? 'text-sky-900' : 'text-slate-500'}`}>
-                      {potFile ? potFile.name : 'Select POT File'}
-                    </p>
-                  </div>
-                </div>
-              </div>
+              <Dropzone
+                label="01 — Template Odoo (CSV / XLSX)"
+                sublabel=".csv · .xlsx · .xls"
+                file={odooFile}
+                accept=".csv,.xlsx,.xls"
+                onFile={f => { setOdooFile(f); setStatus('idle'); setLogs([]); }}
+                icon="📄"
+              />
 
-              <button
-                type="submit"
-                disabled={!odooFile || !potFile || isProcessing}
-                className="group w-full relative flex items-center justify-center gap-3 overflow-hidden rounded-2xl bg-slate-900 px-8 py-5 font-bold text-white shadow-2xl transition-all hover:bg-sky-700 hover:-translate-y-1 active:scale-95 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:translate-y-0"
-              >
-                {isProcessing ? (
-                  <RefreshCw className="h-6 w-6 animate-spin text-sky-400" />
-                ) : (
-                  <>
-                    <Download className="h-6 w-6 transition-transform group-hover:scale-110" />
-                    <span>LAUNCH CONVERSION</span>
-                  </>
-                )}
+              <Dropzone
+                label="02 — Master Data POT (XLSX)"
+                sublabel=".xlsx · .xls"
+                file={potFile}
+                accept=".xlsx,.xls"
+                onFile={f => { setPotFile(f); setStatus('idle'); setLogs([]); }}
+                icon="📊"
+              />
+
+              <button className="btn btn-primary" onClick={handleConvert} disabled={!ready}>
+                {status === 'processing'
+                  ? <><span className="spin">⟳</span> Processing…</>
+                  : <><span>↓</span> Convert & Download</>}
               </button>
-            </form>
 
-            <AnimatePresence>
-              {error && (
-                <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
-                  className="mt-6 flex items-center gap-3 rounded-2xl bg-red-50 p-4 text-sm font-medium text-red-600 border border-red-100"
-                >
-                  <AlertCircle className="h-5 w-5" />
-                  <p>{error}</p>
-                </motion.div>
-              )}
-              {success && (
-                <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
-                  className="mt-6 flex items-center gap-4 rounded-2xl bg-emerald-50 p-5 text-sm border border-emerald-100 text-emerald-800"
-                >
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-white shadow-lg shadow-emerald-200">
-                    <CheckCircle2 className="h-6 w-6" />
-                  </div>
-                  <div>
-                    <p className="font-bold">Sync Successful!</p>
-                    <p className="opacity-80 font-medium">Final template is ready to be imported.</p>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </section>
-
-          {/* Bagian Info (Kanan) */}
-          <aside className="lg:col-span-5 space-y-6">
-            <div className="rounded-3xl bg-white p-8 shadow-sm border border-slate-100">
-              <h3 className="mb-6 text-sm font-bold uppercase tracking-[0.2em] text-slate-400">Technical Protocol</h3>
-              <div className="space-y-6">
-                {[
-                  { title: "Matching Logic", desc: "PO Number & Material ID (Trimmed)", icon: ShieldCheck },
-                  { title: "ID Sanitization", desc: "Automatic Prefix Removal", icon: Zap },
-                  { title: "Processing Mode", desc: "Full Multi-Sheet Scanning", icon: RefreshCw }
-                ].map((item, idx) => (
-                  <div key={idx} className="flex gap-4">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-50 border border-slate-100">
-                      <item.icon className="h-5 w-5 text-sky-600" />
-                    </div>
-                    <div>
-                      <p className="text-sm font-bold text-slate-800">{item.title}</p>
-                      <p className="text-xs font-medium text-slate-500 mt-0.5">{item.desc}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="rounded-3xl bg-slate-900 p-8 text-white shadow-2xl relative overflow-hidden">
-               <div className="relative z-10">
-                <h3 className="mb-4 text-lg font-bold">Quick Start</h3>
-                <div className="space-y-4">
-                  <div className="flex gap-3 text-xs font-medium text-slate-400">
-                    <span className="text-sky-400">01</span>
-                    <p>Upload <span className="text-white">Template Odoo</span> hasil export.</p>
-                  </div>
-                  <div className="flex gap-3 text-xs font-medium text-slate-400">
-                    <span className="text-sky-400">02</span>
-                    <p>Upload <span className="text-white">Master Data POT</span> terbaru.</p>
-                  </div>
-                  <div className="flex gap-3 text-xs font-medium text-slate-400">
-                    <span className="text-sky-400">03</span>
-                    <p>Sistem akan memvalidasi <span className="text-white font-mono">id, status,estimasi received </span> dan <span className="text-white font-mono">remarks</span>.</p>
-                  </div>
+              {status === 'done' && (
+                <div className="status-success">
+                  ✓ Berhasil! File <strong>SIAP_IMPORT_ODOO_FINAL.xlsx</strong> sudah terunduh.
                 </div>
-               </div>
-               <div className="absolute -right-8 -bottom-8 opacity-10">
-                 <Rocket className="h-32 w-32 rotate-12" />
-               </div>
+              )}
+              {status === 'error' && (
+                <div className="status-error">⚠ {errMsg}</div>
+              )}
             </div>
-          </aside>
-        </main>
 
-        <footer className="mt-16 text-center">
-          <div className="flex flex-col items-center gap-3">
-             <div className="h-px w-16 bg-slate-200" />
-             <p className="text-[10px] font-bold uppercase tracking-[0.4em] text-slate-400">
-                Serving You Better - Created By IT Team ELokarsa • 2026
-             </p>
+            {/* Log */}
+            {logs.length > 0 && (
+              <div className="card" style={{ marginTop: 16 }}>
+                <p className="card-title">// Processing Log</p>
+                <div className="log-panel">
+                  {logs.map((l, i) => (
+                    <div key={i} className={`log-${l.type}`}>
+                      {l.type === 'info' ? '›' : l.type === 'warn' ? '⚠' : l.type === 'success' ? '✓' : '✗'} {l.msg}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
-        </footer>
+
+          {/* Right: Info */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div className="card">
+              <p className="card-title">// Panduan</p>
+              {[
+                ['Template Odoo', 'Export Purchase Order Lines dari Odoo. Pastikan kolom Order Reference & Product ada.'],
+                ['Master Data POT', 'File SOT/POT terbaru. Semua sheet akan di-scan otomatis.'],
+                ['Convert & Download', 'Klik tombol — file hasil langsung terunduh. Tidak perlu internet atau server.'],
+              ].map(([title, desc], i) => (
+                <div key={i} className="info-item">
+                  <span className="info-num">{i + 1}</span>
+                  <p className="info-text"><strong>{title}</strong> — {desc}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="card">
+              <p className="card-title">// Spesifikasi</p>
+              <table className="spec">
+                <tbody>
+                  {[
+                    ['Engine', 'Browser (SheetJS)'],
+                    ['Backend', 'Tidak diperlukan'],
+                    ['Matching', 'PO + Material ID'],
+                    ['Fallback', 'Material only / PO only'],
+                    ['Format Input', 'CSV, XLSX, XLS'],
+                    ['Multi-Sheet', 'Semua sheet di-scan'],
+                    ['Output', 'SIAP_IMPORT_ODOO_FINAL.xlsx'],
+                  ].map(([k, v]) => (
+                    <tr key={k}><td>{k}</td><td>{v}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <footer className="footer">SERVING YOU BETTER · CREATED BY IT TEAM ELOKARSA · 2026</footer>
       </div>
-    </div>
+    </>
   );
 }

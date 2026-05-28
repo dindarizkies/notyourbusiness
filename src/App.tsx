@@ -372,11 +372,10 @@ export default function App() {
 
       <div className="app">
         <header className="header">
-          <div className="badge"><span className="badge-dot" />Frontend Processing Engine</div>
+          <div className="badge"><span className="badge-dot" />🚀 High-Speed Matching Engine</div>
           <h1 className="title">Odoo × POT <em>Smart-Sync</em></h1>
           <p className="subtitle">
-            Automasi sinkronisasi tarikan Odoo dengan data POT.<br />
-            Semua proses berjalan langsung di browser — tidak perlu server.
+            Platform automasi data order pembelian untuk sinkronisasi tarikan <strong>Odoo</strong> dengan basis data <strong>POT</strong> secara instan.
           </p>
         </header>
 
@@ -441,7 +440,7 @@ export default function App() {
               <p className="card-title">// Panduan</p>
               {[
                 ['Template Odoo', 'Export Purchase Order Lines dari Odoo. Pastikan kolom Order Reference & Product ada.'],
-                ['Master Data POT', 'File SOT/POT terbaru. Semua sheet akan di-scan otomatis.'],
+                ['Master Data POT', 'File POT terbaru. Semua sheet akan di-scan otomatis.'],
                 ['Convert & Download', 'Klik tombol — file hasil langsung terunduh. Tidak perlu internet atau server.'],
               ].map(([title, desc], i) => (
                 <div key={i} className="info-item">

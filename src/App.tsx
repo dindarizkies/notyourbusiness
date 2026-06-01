@@ -2,174 +2,300 @@ import { useState, useRef, useCallback } from 'react';
 import * as XLSX from 'xlsx';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-interface ProcessingLog {
-  type: 'info' | 'warn' | 'success' | 'error';
-  msg: string;
-}
+interface Log { type: 'info' | 'warn' | 'success' | 'error'; msg: string; }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-const findCol = (keys: string[], candidates: string[]): string | undefined => {
-  const lk = keys.map(k => k.toLowerCase().trim());
-  for (const c of candidates) {
-    const idx = lk.indexOf(c.toLowerCase().trim());
-    if (idx !== -1) return keys[idx];
-  }
-  for (const c of candidates) {
-    const found = keys.find(k => k.toLowerCase().includes(c.toLowerCase()));
-    if (found) return found;
-  }
-  return undefined;
-};
 
-const clean = (val: any): string =>
+// Uppercase + hapus spasi dan karakter non-alphanumeric → untuk fuzzy matching
+const superclean = (val: any): string =>
   String(val ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
-const extractPoKey = (val: string): string => {
+// Format tanggal Excel serial number atau Date object ke string "YYYY-MM-DD"
+const formatDate = (val: any): string => {
   if (!val) return '';
-  const m = val.match(/purchase_order_(\d+)/i);
-  return m ? m[1] : val.trim();
-};
-
-const extractProductKey = (val: string): string => {
-  if (!val) return '';
-  if (val.startsWith('__export__')) {
-    const m = val.match(/product_product_(\d+)/i);
-    return m ? m[1] : val;
+  // Sudah string → kembalikan langsung
+  if (typeof val === 'string') return val.trim();
+  // Date object (openpyxl / SheetJS kadang parse otomatis)
+  if (val instanceof Date) {
+    const y = val.getFullYear();
+    const m = String(val.getMonth() + 1).padStart(2, '0');
+    const d = String(val.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
   }
-  const bracket = val.match(/^\[([^\]]+)\]/);
-  if (bracket) return bracket[1].trim();
-  if (val.length > 3 && val[2] === ' ') return val.substring(3).trim();
-  return val.trim();
+  // Excel serial number (SheetJS dengan raw:true)
+  if (typeof val === 'number') {
+    const date = XLSX.SSF.parse_date_code(val);
+    if (date) {
+      const y = date.y;
+      const m = String(date.m).padStart(2, '0');
+      const d = String(date.d).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+  }
+  return String(val).trim();
 };
 
-const readFileAsBuffer = (file: File): Promise<ArrayBuffer> =>
+const readBuffer = (file: File): Promise<ArrayBuffer> =>
   new Promise((res, rej) => {
-    const reader = new FileReader();
-    reader.onload = e => res(e.target!.result as ArrayBuffer);
-    reader.onerror = () => rej(new Error('Gagal membaca file'));
-    reader.readAsArrayBuffer(file);
+    const r = new FileReader();
+    r.onload  = e => res(e.target!.result as ArrayBuffer);
+    r.onerror = () => rej(new Error('Gagal membaca file'));
+    r.readAsArrayBuffer(file);
   });
 
-// ─── Core conversion logic ────────────────────────────────────────────────────
-async function convertFiles(
-  odooFile: File,
-  potFile: File,
-  log: (l: ProcessingLog) => void
-): Promise<Blob> {
-  // Read Odoo
-  const odrBuf = await readFileAsBuffer(odooFile);
-  const wbOdoo = XLSX.read(odrBuf, { type: 'array' });
-  const dfOdoo: any[] = XLSX.utils.sheet_to_json(wbOdoo.Sheets[wbOdoo.SheetNames[0]]);
+// ─── Konversi ─────────────────────────────────────────────────────────────────
+//
+// ALUR:
+// 1. Baca Template B (SOT XLSX) → index by key: superclean(PO) + '__' + superclean(Material)
+//    Kolom di SOT:
+//      - Key 1 : "Purchase order number"
+//      - Key 2 : "Material"
+//      - status           : "Status"         (kolom pertama, nama sheet seperti "Ready Stock Within This Week")
+//      - item_status      : "ITEM STATUS"
+//      - estimated_received: "ESTIMATED RECEIVED BY DEALERS (Date)_Details"
+//      - remarks          : "REMARKS"
+//
+// 2. Baca Template A (Odoo CSV/XLSX) → loop tiap baris
+//    Kolom di Odoo:
+//      - id         : "id"
+//      - order_id   : "order_id"   → di-match ke "Purchase order number" SOT
+//      - product_id : "product_id" → di-match ke "Material" SOT
+//
+// 3. Skip baris yang product_id mengandung "BIAYA"
+// 4. VLOOKUP: key = superclean(order_id) + '__' + superclean(product_id)
+// 5. Output per baris: id, status, item_status, estimated_received, remarks
+//    (baris tanpa match tetap ada, kolom dikosongkan)
 
-  if (dfOdoo.length === 0) throw new Error('File Odoo kosong atau tidak bisa dibaca.');
+async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Promise<Blob> {
 
-  const odooKeys = Object.keys(dfOdoo[0]);
-  const colId      = findCol(odooKeys, ['external id', 'external_id', 'id']);
-  const colOrder   = findCol(odooKeys, ['order_id', 'order reference', 'order_reference', 'purchase order', 'po number', 'no po']);
-  const colProduct = findCol(odooKeys, ['product_id', 'product', 'product name', 'material', 'item', 'sku']);
+  // ── Step 1: Baca SOT → bangun index ────────────────────────────────────────
+  const sotBuf = await readBuffer(sotFile);
+  // cellDates: false agar tanggal tetap sebagai serial number, kita format sendiri
+  const wbSot  = XLSX.read(sotBuf, { type: 'array', cellDates: true });
 
-  log({ type: 'info', msg: `Odoo: ${dfOdoo.length} baris | id="${colId}" | order="${colOrder}" | product="${colProduct}"` });
+  const sotIndex: Record<string, {
+    status: string; item_status: string; estimated_received: string; remarks: string;
+  }> = {};
 
-  if (!colOrder || !colProduct)
-    throw new Error(`Kolom Odoo tidak dikenali. Kolom tersedia: [${odooKeys.join(', ')}]. Butuh kolom PO & Produk.`);
+  let sotRows = 0;
 
-  const sampleProd = String(dfOdoo[0][colProduct] ?? '');
-  const isExtId = sampleProd.startsWith('__export__');
-  if (isExtId) log({ type: 'warn', msg: 'Kolom Product berformat External ID — matching via ID numerik internal.' });
+  for (const sheetName of wbSot.SheetNames) {
+    const rows: any[] = XLSX.utils.sheet_to_json(wbSot.Sheets[sheetName], { raw: false });
+    if (rows.length === 0) {
+      log({ type: 'warn', msg: `Sheet "${sheetName}": kosong — dilewati` });
+      continue;
+    }
 
-  const processedOdoo = dfOdoo.map(row => ({
-    ...row,
-    _po:  clean(extractPoKey(String(row[colOrder!] ?? ''))),
-    _mat: clean(extractProductKey(String(row[colProduct!] ?? ''))),
-  }));
+    const cols = Object.keys(rows[0]);
 
-  // Read POT
-  const potBuf = await readFileAsBuffer(potFile);
-  const wbPot  = XLSX.read(potBuf, { type: 'array' });
-  const potDB: Record<string, any> = {};
-  let potRows = 0;
+    // ── Mapping kolom SOT ──
+    // Kunci matching
+    const colPO = cols.find(c =>
+      c.toUpperCase().includes('PURCHASE') && c.toUpperCase().includes('ORDER') && c.toUpperCase().includes('NUMBER')
+    ) ?? cols.find(c => c.toUpperCase().includes('PURCHASE') && c.toUpperCase().includes('ORDER'));
 
-  for (const sheetName of wbPot.SheetNames) {
-    const dfPot: any[] = XLSX.utils.sheet_to_json(wbPot.Sheets[sheetName]);
-    if (dfPot.length === 0) continue;
+    const colMat = cols.find(c => c.toUpperCase().trim() === 'MATERIAL');
 
-    const pk   = Object.keys(dfPot[0]);
-    const c_po  = findCol(pk, ['purchase order number', 'purchase order', 'po number', 'no po', 'nomor po', 'order_id']);
-    const c_mat = findCol(pk, ['material', 'material id', 'part number', 'product', 'item', 'sku', 'kode']);
-    if (!c_po || !c_mat) { log({ type: 'warn', msg: `Sheet "${sheetName}": kolom PO/Material tidak ditemukan, dilewati.` }); continue; }
+    if (!colPO || !colMat) {
+      log({ type: 'warn', msg: `Sheet "${sheetName}": kolom "Purchase order number" / "Material" tidak ditemukan — dilewati. Kolom: [${cols.slice(0,6).join(', ')}…]` });
+      continue;
+    }
 
-    const c_status = findCol(pk, ['status']);
-    const c_istat  = findCol(pk, ['item status', 'item_status']);
-    const c_est    = findCol(pk, ['estimated received by dealers (date)_details', 'estimated received', 'eta', 'estimated date']);
-    const c_rem    = findCol(pk, ['remarks', 'catatan', 'keterangan', 'note', 'notes']);
+    // Status = kolom "Status" pertama (nilainya adalah nama sheet / kategori)
+    const colStatus = cols.find(c => c.trim() === 'Status' || c.trim() === 'STATUS');
 
-    log({ type: 'info', msg: `Sheet "${sheetName}": ${dfPot.length} baris | po="${c_po}" | mat="${c_mat}"` });
+    // Item Status
+    const colIStatus = cols.find(c =>
+      c.toUpperCase().replace(/\s/g, '') === 'ITEMSTATUS' ||
+      (c.toUpperCase().includes('ITEM') && c.toUpperCase().includes('STATUS'))
+    );
 
-    for (const row of dfPot) {
-      const kp  = clean(String(row[c_po!]  ?? ''));
-      const km  = clean(String(row[c_mat!] ?? ''));
-      if (!kp && !km) continue;
+    // Estimated Received — kolom panjang: "ESTIMATED RECEIVED BY DEALERS (Date)_Details"
+    const colEst = cols.find(c => {
+      const u = c.toUpperCase();
+      return u.includes('ESTIMATED') && u.includes('RECEIVED');
+    });
 
-      const val = {
-        status:      c_status ? (row[c_status] ?? '') : '',
-        item_status: c_istat  ? (row[c_istat]  ?? '') : '',
-        est:         c_est    ? (row[c_est]     ?? '') : '',
-        remarks:     c_rem    ? (row[c_rem]     ?? '') : '',
-      };
-      const kFull = `${kp}__${km}`;
-      const kMat  = `MAT_${km}`;
-      const kPo   = `PO_${kp}`;
-      if (!potDB[kFull]) potDB[kFull] = val;
-      if (!potDB[kMat])  potDB[kMat]  = val;
-      if (!potDB[kPo])   potDB[kPo]   = val;
-      potRows++;
+    // Remarks
+    const colRemarks = cols.find(c => c.toUpperCase().trim() === 'REMARKS');
+
+    log({ type: 'info', msg: `Sheet "${sheetName}" [${rows.length} baris] PO="${colPO}" | Mat="${colMat}" | Status="${colStatus ?? '—'}" | ItemStatus="${colIStatus ?? '—'}" | Est="${colEst ?? '—'}" | Remarks="${colRemarks ?? '—'}"` });
+
+    for (const row of rows) {
+      const po  = String(row[colPO!]  ?? '').trim();
+      const mat = String(row[colMat!] ?? '').trim();
+      if (!po && !mat) continue;
+
+      const key = superclean(po) + '__' + superclean(mat);
+
+      // Simpan hanya entri pertama (tidak overwrite jika duplikat)
+      if (!sotIndex[key]) {
+        // Status: jika kolom Status ada dan isinya sama dengan nama sheet (kategori),
+        // kita pakai nama sheet sebagai status agar lebih informatif
+        const rawStatus = colStatus ? String(row[colStatus] ?? '').trim() : '';
+        const statusVal = rawStatus || sheetName;
+
+        sotIndex[key] = {
+          status:             statusVal,
+          item_status:        colIStatus ? String(row[colIStatus] ?? '').trim() : '',
+          estimated_received: colEst     ? formatDate(row[colEst])              : '',
+          remarks:            colRemarks ? String(row[colRemarks] ?? '').trim() : '',
+        };
+      }
+      sotRows++;
     }
   }
 
-  log({ type: 'info', msg: `POT: ${potRows} baris diindeks, ${Object.keys(potDB).length} keys` });
-  if (potRows === 0) throw new Error('File POT kosong atau format kolom tidak dikenali.');
+  log({ type: 'info', msg: `SOT selesai: ${sotRows} baris diproses | ${Object.keys(sotIndex).length} kombinasi PO+Material unik dalam index` });
 
-  // Match
-  let mFull = 0, mMat = 0, mPo = 0, noM = 0;
-  const finalData = processedOdoo
-    .map(row => {
-      const kFull = `${row._po}__${row._mat}`;
-      const kMat  = `MAT_${row._mat}`;
-      const kPo   = `PO_${row._po}`;
-      let pv = potDB[kFull]; if (pv) { mFull++; }
-      else { pv = potDB[kMat]; if (pv) { mMat++; } else { pv = potDB[kPo]; if (pv) { mPo++; } else { noM++; return null; } } }
-      return {
-        'id':                 colId ? (row[colId] ?? '') : '',
-        'status':             pv.status,
-        'item_status':        pv.item_status,
-        'estimated_received': pv.est,
-        'remarks':            pv.remarks,
-      };
-    })
-    .filter(Boolean);
-
-  log({ type: 'info', msg: `Match: PO+Mat=${mFull} | Mat=${mMat} | PO=${mPo} | Tidak cocok=${noM}` });
-  log({ type: 'success', msg: `${finalData.length} baris berhasil diproses!` });
-
-  if (finalData.length === 0) {
-    const hint = isExtId
-      ? ' TIP: Export ulang Odoo dengan kolom Product dalam format Display Name (bukan External ID).'
-      : '';
-    throw new Error(`Tidak ada data yang cocok antara Odoo (${processedOdoo.length} baris) dan POT (${potRows} baris).${hint}`);
+  if (sotRows === 0) {
+    throw new Error('File SOT kosong atau kolom "Purchase order number" & "Material" tidak ditemukan di semua sheet.');
   }
 
-  const wbOut = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wbOut, XLSX.utils.json_to_sheet(finalData), 'SIAP_IMPORT');
-  const outBuf = XLSX.write(wbOut, { type: 'array', bookType: 'xlsx' });
-  return new Blob([outBuf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  // ── Step 2: Baca Template A (Odoo) ─────────────────────────────────────────
+  const odooBuf = await readBuffer(odooFile);
+  let odooRows: any[] = [];
+
+  const ext = odooFile.name.split('.').pop()?.toLowerCase();
+
+  if (ext === 'csv') {
+    // Parse CSV
+    const wbOdoo = XLSX.read(odooBuf, { type: 'array' });
+    odooRows = XLSX.utils.sheet_to_json(wbOdoo.Sheets[wbOdoo.SheetNames[0]], { raw: false });
+  } else {
+    // XLSX / XLS
+    const wbOdoo = XLSX.read(odooBuf, { type: 'array', cellDates: true });
+    odooRows = XLSX.utils.sheet_to_json(wbOdoo.Sheets[wbOdoo.SheetNames[0]], { raw: false });
+  }
+
+  if (odooRows.length === 0) throw new Error('File Odoo (Template A) kosong atau tidak bisa dibaca.');
+
+  const cols = Object.keys(odooRows[0]);
+
+  // Deteksi kolom Odoo:
+  // "id" — External ID Odoo, wajib ada
+  const colId = cols.find(c => c === 'id')
+    ?? cols.find(c => c.toUpperCase().includes('EXTERNAL') && c.toUpperCase().includes('ID'))
+    ?? cols[0];
+
+  // "order_id" — nomor PO Odoo, di-match ke "Purchase order number" SOT
+  const colOrderId = cols.find(c => c === 'order_id')
+    ?? cols.find(c => c.toUpperCase().includes('ORDER') && c.toUpperCase().includes('ID'))
+    ?? cols.find(c => c.toUpperCase().includes('ORDER'));
+
+  // "product_id" — kode material, di-match ke "Material" SOT
+  const colProdId = cols.find(c => c === 'product_id')
+    ?? cols.find(c => c.toUpperCase().includes('PRODUCT') && c.toUpperCase().includes('ID'))
+    ?? cols.find(c => c.toUpperCase().includes('PRODUCT'));
+
+  log({ type: 'info', msg: `Odoo: ${odooRows.length} baris | id="${colId}" | order_id="${colOrderId ?? '—'}" | product_id="${colProdId ?? '—'}"` });
+  const sampleProduct = String(odooRows[0]?.[colProdId] ?? '').trim();
+const sampleTrimmed = sampleProduct.replace(/^[A-Za-z]+\s+/, '').trim();
+
+log({
+  type: 'info',
+  msg: `Pre-processing product_id aktif: "${sampleProduct}" -> "${sampleTrimmed}"`
+});
+
+  if (!colOrderId) throw new Error(`Kolom order_id tidak ditemukan. Kolom tersedia: [${cols.join(', ')}]`);
+  if (!colProdId)  throw new Error(`Kolom product_id tidak ditemukan. Kolom tersedia: [${cols.join(', ')}]`);
+
+  // ── Step 3-5: Loop, skip BIAYA, VLOOKUP, bangun output ─────────────────────
+  let matched = 0, noMatch = 0, skipped = 0;
+  const result: any[] = [];
+  const noMatchKeys: string[] = [];
+
+  for (const row of odooRows) {
+
+  const orderVal = String(row[colOrderId] ?? '').trim();
+
+  // Nilai asli product_id dari Template A
+  const rawProdVal = String(row[colProdId] ?? '').trim();
+
+  // Skip BIAYA sebelum trimming
+  if (rawProdVal.toUpperCase().includes('BIAYA')) {
+    skipped++;
+    continue;
+  }
+
+  // Hapus prefix material:
+  // FI 8890CN -> 8890CN
+  // QSP T112NXLRL-Q -> T112NXLRL-Q
+  // MBP 7010-CS -> 7010-CS
+  const prodVal = rawProdVal.replace(/^[A-Za-z]+\s+/, '').trim();
+
+  // Matching menggunakan product_id yang sudah dipangkas
+  const cleanOrder = superclean(orderVal);
+  const cleanProd  = superclean(prodVal);
+
+    let hit = sotIndex[cleanOrder + '__' + cleanProd];
+
+    // Fallback: order_id di Odoo prefix "P-" → coba strip prefix P angka-angka
+    if (!hit) {
+      // Ambil hanya angka dari order_id (misal "P-2611626" → "2611626")
+      const numericOrder = orderVal.replace(/[^0-9]/g, '');
+      if (numericOrder) {
+        hit = sotIndex[superclean(numericOrder) + '__' + cleanProd];
+      }
+    }
+
+    if (hit) {
+      matched++;
+    } else {
+      noMatch++;
+      if (noMatchKeys.length < 10) {
+  noMatchKeys.push(
+    `order="${orderVal}" product="${rawProdVal}" -> "${prodVal}"`
+  );
+}
+    }
+
+    result.push({
+      'id':                 String(row[colId] ?? '').trim(),
+      'status':             hit?.status             ?? '',
+      'item_status':        hit?.item_status        ?? '',
+      'estimated_received': hit?.estimated_received ?? '',
+      'remarks':            hit?.remarks            ?? '',
+    });
+  }
+
+  log({
+    type: matched > 0 ? 'success' : 'warn',
+    msg:  `Hasil: ✓ ${matched} cocok | ✗ ${noMatch} tidak ditemukan di SOT | ⊘ ${skipped} baris BIAYA dilewati`,
+  });
+
+  if (noMatch > 0 && noMatchKeys.length > 0) {
+    log({ type: 'warn', msg: `Contoh tidak cocok: ${noMatchKeys.slice(0, 5).join(' | ')}` });
+    log({ type: 'info', msg: `Tip: Pastikan nomor PO di Odoo (order_id) cocok dengan kolom "Purchase order number" di SOT.` });
+  }
+
+  log({ type: 'success', msg: `${result.length} baris siap diexport sebagai Template C (siap import Odoo)!` });
+
+  // ── Export Template C ───────────────────────────────────────────────────────
+  // Kolom output: id, status, item_status, estimated_received, remarks
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.json_to_sheet(result, {
+    header: ['id', 'status', 'item_status', 'estimated_received', 'remarks'],
+  });
+
+  // Set lebar kolom agar nyaman dibaca
+  ws['!cols'] = [
+    { wch: 48 }, // id
+    { wch: 30 }, // status
+    { wch: 20 }, // item_status
+    { wch: 22 }, // estimated_received
+    { wch: 40 }, // remarks
+  ];
+
+  XLSX.utils.book_append_sheet(wb, ws, 'SIAP_IMPORT');
+  const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+  return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
 
-// ─── Dropzone component ───────────────────────────────────────────────────────
-function Dropzone({
-  label, sublabel, file, accept, onFile, icon,
-}: {
+// ─── Dropzone Component ───────────────────────────────────────────────────────
+function Dropzone({ label, sublabel, file, accept, onFile, icon }: {
   label: string; sublabel: string; file: File | null;
-  accept: string; onFile: (f: File) => void; icon: React.ReactNode;
+  accept: string; onFile: (f: File) => void; icon: string;
 }) {
   const ref = useRef<HTMLInputElement>(null);
   const [drag, setDrag] = useState(false);
@@ -181,42 +307,50 @@ function Dropzone({
   }, [onFile]);
 
   return (
-    <div className="dz-wrap">
-      <p className="dz-label">{label}</p>
+    <div style={{ marginBottom: 16 }}>
+      <p style={{ fontSize: 12, color: 'var(--muted)', fontFamily: 'var(--mono)', marginBottom: 8, letterSpacing: '.06em' }}>{label}</p>
       <div
-        className={`dz${drag ? ' dz--drag' : ''}${file ? ' dz--filled' : ''}`}
         onClick={() => ref.current?.click()}
         onDragOver={e => { e.preventDefault(); setDrag(true); }}
         onDragLeave={() => setDrag(false)}
         onDrop={onDrop}
+        style={{
+          border: `1.5px ${file ? 'solid' : 'dashed'} ${file ? 'rgba(59,130,246,.4)' : drag ? 'var(--accent)' : 'var(--border)'}`,
+          background: file ? 'rgba(59,130,246,.05)' : drag ? 'rgba(59,130,246,.06)' : 'transparent',
+          borderRadius: 12, padding: '20px 16px', cursor: 'pointer', transition: 'all .2s',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, textAlign: 'center',
+        }}
       >
-        <input ref={ref} type="file" accept={accept} className="dz-input"
+        <input ref={ref} type="file" accept={accept} style={{ display: 'none' }}
           onChange={e => { const f = e.target.files?.[0]; if (f) onFile(f); }} />
-        <span className="dz-icon">{icon}</span>
-        {file
-          ? <><span className="dz-fname">{file.name}</span><span className="dz-fsize">{(file.size/1024).toFixed(1)} KB</span></>
-          : <><span className="dz-prompt">Klik atau drag file di sini</span><span className="dz-sub">{sublabel}</span></>
-        }
+        <span style={{ fontSize: 28, lineHeight: 1, marginBottom: 4 }}>{file ? '✅' : icon}</span>
+        {file ? <>
+          <span style={{ fontSize: 12, color: 'var(--accent2)', fontFamily: 'var(--mono)', fontWeight: 500, wordBreak: 'break-all' }}>{file.name}</span>
+          <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'var(--mono)' }}>{(file.size / 1024).toFixed(1)} KB</span>
+        </> : <>
+          <span style={{ fontSize: 13, color: 'var(--text)', fontWeight: 600 }}>Klik atau drag file di sini</span>
+          <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'var(--mono)' }}>{sublabel}</span>
+        </>}
       </div>
     </div>
   );
 }
 
-// ─── Main App ─────────────────────────────────────────────────────────────────
+// ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [odooFile, setOdooFile] = useState<File | null>(null);
-  const [potFile,  setPotFile]  = useState<File | null>(null);
-  const [status,   setStatus]   = useState<'idle'|'processing'|'done'|'error'>('idle');
-  const [logs,     setLogs]     = useState<ProcessingLog[]>([]);
+  const [sotFile,  setSotFile]  = useState<File | null>(null);
+  const [status,   setStatus]   = useState<'idle' | 'processing' | 'done' | 'error'>('idle');
+  const [logs,     setLogs]     = useState<Log[]>([]);
   const [errMsg,   setErrMsg]   = useState('');
 
-  const addLog = (l: ProcessingLog) => setLogs(prev => [...prev, l]);
+  const addLog = (l: Log) => setLogs(p => [...p, l]);
 
   const handleConvert = async () => {
-    if (!odooFile || !potFile) return;
+    if (!odooFile || !sotFile) return;
     setStatus('processing'); setLogs([]); setErrMsg('');
     try {
-      const blob = await convertFiles(odooFile, potFile, addLog);
+      const blob = await convert(odooFile, sotFile, addLog);
       const url  = URL.createObjectURL(blob);
       const a    = document.createElement('a');
       a.href = url; a.download = 'SIAP_IMPORT_ODOO_FINAL.xlsx';
@@ -229,205 +363,116 @@ export default function App() {
     }
   };
 
-  const ready = !!odooFile && !!potFile && status !== 'processing';
+  const logColor = { info: '#94a3b8', warn: '#f59e0b', success: '#10b981', error: '#ef4444' };
+  const logIcon  = { info: '›', warn: '⚠', success: '✓', error: '✗' };
 
   return (
     <>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap');
-
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
         :root {
-          --bg:      #0b0f1a;
-          --surface: #111827;
-          --border:  #1f2d45;
-          --accent:  #3b82f6;
-          --accent2: #06b6d4;
-          --green:   #10b981;
-          --yellow:  #f59e0b;
-          --red:     #ef4444;
-          --text:    #e2e8f0;
-          --muted:   #64748b;
-          --mono:    'DM Mono', monospace;
-          --sans:    'Syne', sans-serif;
+          --bg: #0b0f1a; --surface: #111827; --border: #1f2d45;
+          --accent: #3b82f6; --accent2: #06b6d4; --green: #10b981;
+          --yellow: #f59e0b; --red: #ef4444; --text: #e2e8f0; --muted: #64748b;
+          --mono: 'DM Mono', monospace; --sans: 'Syne', sans-serif;
         }
-
         body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; }
-
-        /* Grid bg */
         body::before {
-          content: '';
-          position: fixed; inset: 0; z-index: 0;
-          background-image:
-            linear-gradient(rgba(59,130,246,.04) 1px, transparent 1px),
-            linear-gradient(90deg, rgba(59,130,246,.04) 1px, transparent 1px);
+          content: ''; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+          background-image: linear-gradient(rgba(59,130,246,.04) 1px,transparent 1px),
+                            linear-gradient(90deg,rgba(59,130,246,.04) 1px,transparent 1px);
           background-size: 40px 40px;
-          pointer-events: none;
         }
-
-        .app { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding: 48px 24px 80px; }
-
-        /* Header */
-        .header { text-align: center; margin-bottom: 56px; }
-        .badge {
-          display: inline-flex; align-items: center; gap: 6px;
-          background: rgba(59,130,246,.12); border: 1px solid rgba(59,130,246,.25);
-          color: var(--accent2); font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
-          padding: 5px 14px; border-radius: 100px; margin-bottom: 20px; text-transform: uppercase;
-        }
-        .badge-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent2); animation: pulse 2s infinite; }
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
-        .title { font-size: clamp(32px, 6vw, 52px); font-weight: 800; letter-spacing: -.02em; line-height: 1.1; }
-        .title em { font-style: normal; color: var(--accent); }
-        .subtitle { margin-top: 14px; color: var(--muted); font-size: 15px; line-height: 1.6; }
-
-        /* Layout */
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-        @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
-
-        /* Card */
-        .card {
-          background: var(--surface); border: 1px solid var(--border);
-          border-radius: 16px; padding: 28px;
-        }
-        .card-title {
-          font-size: 11px; font-family: var(--mono); letter-spacing: .12em;
-          color: var(--muted); text-transform: uppercase; margin-bottom: 20px;
-        }
-
-        /* Dropzone */
-        .dz-wrap { margin-bottom: 16px; }
-        .dz-label { font-size: 12px; color: var(--muted); font-family: var(--mono); margin-bottom: 8px; letter-spacing:.06em; }
-        .dz {
-          position: relative; border: 1.5px dashed var(--border); border-radius: 12px;
-          padding: 20px 16px; cursor: pointer; transition: all .2s;
-          display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center;
-        }
-        .dz:hover, .dz--drag { border-color: var(--accent); background: rgba(59,130,246,.06); }
-        .dz--filled { border-style: solid; border-color: rgba(59,130,246,.4); background: rgba(59,130,246,.05); }
-        .dz-input { display: none; }
-        .dz-icon { font-size: 28px; line-height: 1; margin-bottom: 4px; }
-        .dz-prompt { font-size: 13px; color: var(--text); font-weight: 600; }
-        .dz-sub { font-size: 11px; color: var(--muted); font-family: var(--mono); }
-        .dz-fname { font-size: 12px; color: var(--accent2); font-family: var(--mono); word-break: break-all; font-weight: 500; }
-        .dz-fsize { font-size: 11px; color: var(--muted); font-family: var(--mono); }
-
-        /* Button */
-        .btn {
-          width: 100%; padding: 15px; border: none; border-radius: 12px; cursor: pointer;
-          font-family: var(--sans); font-size: 14px; font-weight: 700; letter-spacing: .04em;
-          text-transform: uppercase; transition: all .2s; margin-top: 8px;
-          display: flex; align-items: center; justify-content: center; gap: 10px;
-        }
-        .btn-primary {
-          background: linear-gradient(135deg, var(--accent), var(--accent2));
-          color: #fff; box-shadow: 0 4px 24px rgba(59,130,246,.3);
-        }
-        .btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 32px rgba(59,130,246,.4); }
-        .btn:disabled { opacity: .4; cursor: not-allowed; transform: none !important; }
-        .spin { animation: spin .8s linear infinite; display: inline-block; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-
-        /* Status */
-        .status-success, .status-error {
-          margin-top: 14px; padding: 12px 16px; border-radius: 10px;
-          font-size: 13px; display: flex; align-items: flex-start; gap: 10px;
-        }
-        .status-success { background: rgba(16,185,129,.1); border: 1px solid rgba(16,185,129,.25); color: var(--green); }
-        .status-error   { background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.2); color: var(--red); }
-
-        /* Log panel */
-        .log-panel {
-          background: #070c14; border: 1px solid var(--border); border-radius: 12px;
-          padding: 16px; font-family: var(--mono); font-size: 11.5px; line-height: 1.7;
-          max-height: 260px; overflow-y: auto;
-        }
-        .log-panel:empty::after { content: 'Log akan muncul saat proses berjalan...'; color: var(--muted); }
-        .log-info    { color: #94a3b8; }
-        .log-warn    { color: var(--yellow); }
-        .log-success { color: var(--green); }
-        .log-error   { color: var(--red); }
-
-        /* Info card */
-        .info-item { display: flex; gap: 12px; margin-bottom: 14px; align-items: flex-start; }
-        .info-num {
-          flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%;
-          background: rgba(59,130,246,.15); border: 1px solid rgba(59,130,246,.3);
-          color: var(--accent); font-family: var(--mono); font-size: 10px;
-          display: flex; align-items: center; justify-content: center; font-weight: 700; margin-top: 1px;
-        }
-        .info-text { font-size: 13px; color: var(--muted); line-height: 1.6; }
-        .info-text strong { color: var(--text); }
-
-        /* Spec table */
-        .spec { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--mono); }
-        .spec td { padding: 8px 0; border-bottom: 1px solid var(--border); }
-        .spec td:first-child { color: var(--muted); }
-        .spec td:last-child { color: var(--accent2); text-align: right; }
-        .spec tr:last-child td { border-bottom: none; }
-
-        .footer { text-align: center; margin-top: 56px; font-size: 11px; color: var(--muted); font-family: var(--mono); letter-spacing: .08em; }
+        @keyframes spin  { to{transform:rotate(360deg)} }
       `}</style>
 
-      <div className="app">
-        <header className="header">
-          <div className="badge"><span className="badge-dot" />🚀 High-Speed Matching Engine</div>
-          <h1 className="title">Odoo × POT <em>Smart-Sync</em></h1>
-          <p className="subtitle">
-            Platform automasi data order pembelian untuk sinkronisasi tarikan <strong>Odoo</strong> dengan basis data <strong>POT</strong> secara instan.
-          </p>
-        </header>
+      <div style={{ position: 'relative', zIndex: 1, maxWidth: 960, margin: '0 auto', padding: '48px 24px 80px' }}>
 
-        <div className="grid">
+        {/* Header */}
+        <div style={{ textAlign: 'center', marginBottom: 56 }}>
+          <div style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            background: 'rgba(59,130,246,.12)', border: '1px solid rgba(59,130,246,.25)',
+            color: 'var(--accent2)', fontFamily: 'var(--mono)', fontSize: 11,
+            letterSpacing: '.12em', padding: '5px 14px', borderRadius: 100,
+            marginBottom: 20, textTransform: 'uppercase',
+          }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--accent2)', animation: 'pulse 2s infinite', display: 'inline-block' }} />
+            🚀 Auto-Convert Engine · ELO KARSA
+          </div>
+          <h1 style={{ fontSize: 'clamp(28px,5vw,48px)', fontWeight: 800, letterSpacing: '-.02em', lineHeight: 1.1 }}>
+            Odoo × SOT <span style={{ color: 'var(--accent)' }}>Smart-Sync</span>
+          </h1>
+          <p style={{ marginTop: 14, color: 'var(--muted)', fontSize: 15, lineHeight: 1.6 }}>
+            Upload <strong style={{ color: 'var(--text)' }}>Template A</strong> (tarikan Odoo) +{' '}
+            <strong style={{ color: 'var(--text)' }}>Template B</strong> (SOT) → otomatis generate{' '}
+            <strong style={{ color: 'var(--green)' }}>Template C</strong> siap import kembali ke Odoo.
+          </p>
+        </div>
+
+        {/* Grid */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(300px,1fr))', gap: 20 }}>
+
           {/* Left: Upload */}
           <div>
-            <div className="card">
-              <p className="card-title">// Upload Files</p>
+            <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 28 }}>
+              <p style={{ fontSize: 11, fontFamily: 'var(--mono)', letterSpacing: '.12em', color: 'var(--muted)', textTransform: 'uppercase', marginBottom: 20 }}>// Upload Files</p>
 
               <Dropzone
-                label="01 — Template Odoo (CSV / XLSX)"
-                sublabel=".csv · .xlsx · .xls"
-                file={odooFile}
-                accept=".csv,.xlsx,.xls"
+                label="01 — Template A · Tarikan Odoo (CSV / XLSX)"
+                sublabel=".csv · .xlsx · .xls  |  Wajib ada kolom: id, order_id, product_id"
+                file={odooFile} accept=".csv,.xlsx,.xls" icon="📄"
                 onFile={f => { setOdooFile(f); setStatus('idle'); setLogs([]); }}
-                icon="📄"
               />
 
               <Dropzone
-                label="02 — Master Data POT (XLSX)"
-                sublabel=".xlsx · .xls"
-                file={potFile}
-                accept=".xlsx,.xls"
-                onFile={f => { setPotFile(f); setStatus('idle'); setLogs([]); }}
-                icon="📊"
+                label="02 — Template B · File SOT (XLSX)"
+                sublabel=".xlsx · .xls  |  Semua sheet di-scan otomatis"
+                file={sotFile} accept=".xlsx,.xls" icon="📊"
+                onFile={f => { setSotFile(f); setStatus('idle'); setLogs([]); }}
               />
 
-              <button className="btn btn-primary" onClick={handleConvert} disabled={!ready}>
+              <button
+                onClick={handleConvert}
+                disabled={!odooFile || !sotFile || status === 'processing'}
+                style={{
+                  width: '100%', padding: 15, border: 'none', borderRadius: 12, marginTop: 8,
+                  background: 'linear-gradient(135deg,var(--accent),var(--accent2))',
+                  color: '#fff', fontFamily: 'var(--sans)', fontSize: 14, fontWeight: 700,
+                  letterSpacing: '.04em', textTransform: 'uppercase', cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+                  opacity: (!odooFile || !sotFile || status === 'processing') ? .4 : 1,
+                  boxShadow: '0 4px 24px rgba(59,130,246,.3)', transition: 'all .2s',
+                }}
+              >
                 {status === 'processing'
-                  ? <><span className="spin">⟳</span> Processing…</>
-                  : <><span>↓</span> Convert & Download</>}
+                  ? <><span style={{ animation: 'spin .8s linear infinite', display: 'inline-block' }}>⟳</span> Processing…</>
+                  : <><span>↓</span> Convert & Download Template C</>}
               </button>
 
               {status === 'done' && (
-                <div className="status-success">
-                  ✓ Berhasil! File <strong>SIAP_IMPORT_ODOO_FINAL.xlsx</strong> sudah terunduh.
+                <div style={{ marginTop: 14, padding: '12px 16px', borderRadius: 10, fontSize: 13,
+                  background: 'rgba(16,185,129,.1)', border: '1px solid rgba(16,185,129,.25)', color: 'var(--green)' }}>
+                  ✓ Berhasil! <strong>SIAP_IMPORT_ODOO_FINAL.xlsx</strong> sudah terunduh — siap di-import ke Odoo.
                 </div>
               )}
               {status === 'error' && (
-                <div className="status-error">⚠ {errMsg}</div>
+                <div style={{ marginTop: 14, padding: '12px 16px', borderRadius: 10, fontSize: 13,
+                  background: 'rgba(239,68,68,.08)', border: '1px solid rgba(239,68,68,.2)', color: 'var(--red)' }}>
+                  ⚠ {errMsg}
+                </div>
               )}
             </div>
 
             {/* Log */}
             {logs.length > 0 && (
-              <div className="card" style={{ marginTop: 16 }}>
-                <p className="card-title">// Processing Log</p>
-                <div className="log-panel">
+              <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 28, marginTop: 16 }}>
+                <p style={{ fontSize: 11, fontFamily: 'var(--mono)', letterSpacing: '.12em', color: 'var(--muted)', textTransform: 'uppercase', marginBottom: 16 }}>// Processing Log</p>
+                <div style={{ background: '#070c14', border: '1px solid var(--border)', borderRadius: 12, padding: 16, fontFamily: 'var(--mono)', fontSize: 11.5, lineHeight: 1.7, maxHeight: 300, overflowY: 'auto' }}>
                   {logs.map((l, i) => (
-                    <div key={i} className={`log-${l.type}`}>
-                      {l.type === 'info' ? '›' : l.type === 'warn' ? '⚠' : l.type === 'success' ? '✓' : '✗'} {l.msg}
-                    </div>
+                    <div key={i} style={{ color: logColor[l.type] }}>{logIcon[l.type]} {l.msg}</div>
                   ))}
                 </div>
               </div>
@@ -436,42 +481,72 @@ export default function App() {
 
           {/* Right: Info */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div className="card">
-              <p className="card-title">// Panduan</p>
+
+            {/* Panduan */}
+            <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 28 }}>
+              <p style={{ fontSize: 11, fontFamily: 'var(--mono)', letterSpacing: '.12em', color: 'var(--muted)', textTransform: 'uppercase', marginBottom: 20 }}>// Panduan</p>
               {[
-                ['Template Odoo', 'Export Purchase Order Lines dari Odoo. Pastikan kolom Order Reference & Product ada.'],
-                ['Master Data POT', 'File POT terbaru. Semua sheet akan di-scan otomatis.'],
-                ['Convert & Download', 'Klik tombol — file hasil langsung terunduh. Tidak perlu internet atau server.'],
+                ['Template A (Odoo)', 'Export Purchase Order Lines dari Odoo dalam format CSV atau XLSX. Wajib ada kolom: id, order_id, product_id.'],
+                ['Template B (SOT)', 'File SOT terbaru (semua sheet di-scan otomatis). Butuh kolom "Purchase order number" & "Material" sebagai kunci matching.'],
+                ['Convert & Download', 'VLOOKUP order_id ↔ Purchase order number, product_id ↔ Material. Otomatis isi 4 kolom. Baris BIAYA dilewati. Hasil = Template C siap import Odoo.'],
               ].map(([title, desc], i) => (
-                <div key={i} className="info-item">
-                  <span className="info-num">{i + 1}</span>
-                  <p className="info-text"><strong>{title}</strong> — {desc}</p>
+                <div key={i} style={{ display: 'flex', gap: 12, marginBottom: 14, alignItems: 'flex-start' }}>
+                  <span style={{
+                    flexShrink: 0, width: 22, height: 22, borderRadius: '50%',
+                    background: 'rgba(59,130,246,.15)', border: '1px solid rgba(59,130,246,.3)',
+                    color: 'var(--accent)', fontFamily: 'var(--mono)', fontSize: 10,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, marginTop: 1,
+                  }}>{i + 1}</span>
+                  <p style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.6 }}>
+                    <strong style={{ color: 'var(--text)' }}>{title}</strong> — {desc}
+                  </p>
                 </div>
               ))}
             </div>
 
-            <div className="card">
-              <p className="card-title">// Spesifikasi</p>
-              <table className="spec">
+            {/* Mapping Kolom */}
+            <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 28 }}>
+              <p style={{ fontSize: 11, fontFamily: 'var(--mono)', letterSpacing: '.12em', color: 'var(--muted)', textTransform: 'uppercase', marginBottom: 20 }}>// Mapping Kolom</p>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, fontFamily: 'var(--mono)' }}>
                 <tbody>
                   {[
-                    ['Engine', 'Browser (SheetJS)'],
-                    ['Backend', 'Tidak diperlukan'],
-                    ['Matching', 'PO + Material ID'],
-                    ['Fallback', 'Material only / PO only'],
-                    ['Format Input', 'CSV, XLSX, XLS'],
-                    ['Multi-Sheet', 'Semua sheet di-scan'],
-                    ['Output', 'SIAP_IMPORT_ODOO_FINAL.xlsx'],
+                    ['Template A key',   'order_id  +  product_id'],
+                    ['Template B key',   'Purchase order number  +  Material'],
+                    ['→ status',         '← Status (nama sheet SOT)'],
+                    ['→ item_status',    '← ITEM STATUS'],
+                    ['→ est. received',  '← ESTIMATED RECEIVED BY DEALERS'],
+                    ['→ remarks',        '← REMARKS'],
+                    ['Output (C)',       'id · status · item_status · est_received · remarks'],
+                    ['Skip',            'Baris product_id mengandung "BIAYA"'],
                   ].map(([k, v]) => (
-                    <tr key={k}><td>{k}</td><td>{v}</td></tr>
+                    <tr key={k}>
+                      <td style={{ padding: '7px 0', borderBottom: '1px solid var(--border)', color: 'var(--muted)', whiteSpace: 'nowrap', paddingRight: 12 }}>{k}</td>
+                      <td style={{ padding: '7px 0', borderBottom: '1px solid var(--border)', color: 'var(--accent2)', textAlign: 'right' }}>{v}</td>
+                    </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+
+            {/* Output Preview */}
+            <div style={{ background: 'var(--surface)', border: '1px solid rgba(16,185,129,.2)', borderRadius: 16, padding: 28 }}>
+              <p style={{ fontSize: 11, fontFamily: 'var(--mono)', letterSpacing: '.12em', color: 'var(--green)', textTransform: 'uppercase', marginBottom: 16 }}>// Output Template C</p>
+              <p style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.7, fontFamily: 'var(--mono)' }}>
+                File hasil: <span style={{ color: 'var(--text)' }}>SIAP_IMPORT_ODOO_FINAL.xlsx</span><br />
+                Sheet: <span style={{ color: 'var(--accent2)' }}>SIAP_IMPORT</span><br /><br />
+                Kolom output:<br />
+                <span style={{ color: 'var(--green)' }}>
+                  id · status · item_status<br />
+                  estimated_received · remarks
+                </span>
+              </p>
+            </div>
           </div>
         </div>
 
-        <footer className="footer">SERVING YOU BETTER · CREATED BY IT TEAM ELOKARSA · 2026</footer>
+        <p style={{ textAlign: 'center', marginTop: 56, fontSize: 11, color: 'var(--muted)', fontFamily: 'var(--mono)', letterSpacing: '.08em' }}>
+          SERVING YOU BETTER · CREATED BY IT TEAM ELOKARSA · 2026
+        </p>
       </div>
     </>
   );

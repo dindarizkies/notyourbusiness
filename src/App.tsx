@@ -44,33 +44,10 @@ const readBuffer = (file: File): Promise<ArrayBuffer> =>
   });
 
 // ─── Konversi ─────────────────────────────────────────────────────────────────
-//
-// ALUR:
-// 1. Baca Template B (SOT XLSX) → index by key: superclean(PO) + '__' + superclean(Material)
-//    Kolom di SOT:
-//      - Key 1 : "Purchase order number"
-//      - Key 2 : "Material"
-//      - status           : "Status"         (kolom pertama, nama sheet seperti "Ready Stock Within This Week")
-//      - item_status      : "ITEM STATUS"
-//      - estimated_received: "ESTIMATED RECEIVED BY DEALERS (Date)_Details"
-//      - remarks          : "REMARKS"
-//
-// 2. Baca Template A (Odoo CSV/XLSX) → loop tiap baris
-//    Kolom di Odoo:
-//      - id         : "id"
-//      - order_id   : "order_id"   → di-match ke "Purchase order number" SOT
-//      - product_id : "product_id" → di-match ke "Material" SOT
-//
-// 3. Skip baris yang product_id mengandung "BIAYA"
-// 4. VLOOKUP: key = superclean(order_id) + '__' + superclean(product_id)
-// 5. Output per baris: id, status, item_status, estimated_received, remarks
-//    (baris tanpa match tetap ada, kolom dikosongkan)
-
 async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Promise<Blob> {
 
   // ── Step 1: Baca SOT → bangun index ────────────────────────────────────────
   const sotBuf = await readBuffer(sotFile);
-  // cellDates: false agar tanggal tetap sebagai serial number, kita format sendiri
   const wbSot  = XLSX.read(sotBuf, { type: 'array', cellDates: true });
 
   const sotIndex: Record<string, {
@@ -81,45 +58,28 @@ async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Pr
 
   for (const sheetName of wbSot.SheetNames) {
     const rows: any[] = XLSX.utils.sheet_to_json(wbSot.Sheets[sheetName], { raw: false });
-    if (rows.length === 0) {
-      log({ type: 'warn', msg: `Sheet "${sheetName}": kosong — dilewati` });
-      continue;
-    }
+    if (rows.length === 0) continue;
 
     const cols = Object.keys(rows[0]);
 
-    // ── Mapping kolom SOT ──
-    // Kunci matching
     const colPO = cols.find(c =>
       c.toUpperCase().includes('PURCHASE') && c.toUpperCase().includes('ORDER') && c.toUpperCase().includes('NUMBER')
     ) ?? cols.find(c => c.toUpperCase().includes('PURCHASE') && c.toUpperCase().includes('ORDER'));
 
     const colMat = cols.find(c => c.toUpperCase().trim() === 'MATERIAL');
 
-    if (!colPO || !colMat) {
-      log({ type: 'warn', msg: `Sheet "${sheetName}": kolom "Purchase order number" / "Material" tidak ditemukan — dilewati. Kolom: [${cols.slice(0,6).join(', ')}…]` });
-      continue;
-    }
+    if (!colPO || !colMat) continue;
 
-    // Status = kolom "Status" pertama (nilainya adalah nama sheet / kategori)
     const colStatus = cols.find(c => c.trim() === 'Status' || c.trim() === 'STATUS');
-
-    // Item Status
     const colIStatus = cols.find(c =>
       c.toUpperCase().replace(/\s/g, '') === 'ITEMSTATUS' ||
       (c.toUpperCase().includes('ITEM') && c.toUpperCase().includes('STATUS'))
     );
-
-    // Estimated Received — kolom panjang: "ESTIMATED RECEIVED BY DEALERS (Date)_Details"
     const colEst = cols.find(c => {
       const u = c.toUpperCase();
       return u.includes('ESTIMATED') && u.includes('RECEIVED');
     });
-
-    // Remarks
     const colRemarks = cols.find(c => c.toUpperCase().trim() === 'REMARKS');
-
-    log({ type: 'info', msg: `Sheet "${sheetName}" [${rows.length} baris] PO="${colPO}" | Mat="${colMat}" | Status="${colStatus ?? '—'}" | ItemStatus="${colIStatus ?? '—'}" | Est="${colEst ?? '—'}" | Remarks="${colRemarks ?? '—'}"` });
 
     for (const row of rows) {
       const po  = String(row[colPO!]  ?? '').trim();
@@ -128,10 +88,7 @@ async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Pr
 
       const key = superclean(po) + '__' + superclean(mat);
 
-      // Simpan hanya entri pertama (tidak overwrite jika duplikat)
       if (!sotIndex[key]) {
-        // Status: jika kolom Status ada dan isinya sama dengan nama sheet (kategori),
-        // kita pakai nama sheet sebagai status agar lebih informatif
         const rawStatus = colStatus ? String(row[colStatus] ?? '').trim() : '';
         const statusVal = rawStatus || sheetName;
 
@@ -146,147 +103,100 @@ async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Pr
     }
   }
 
-  log({ type: 'info', msg: `SOT selesai: ${sotRows} baris diproses | ${Object.keys(sotIndex).length} kombinasi PO+Material unik dalam index` });
+  log({ type: 'info', msg: `SOT selesai: ${sotRows} baris diproses | ${Object.keys(sotIndex).length} kombinasi unik.` });
 
   if (sotRows === 0) {
-    throw new Error('File SOT kosong atau kolom "Purchase order number" & "Material" tidak ditemukan di semua sheet.');
+    throw new Error('File SOT kosong atau kolom "Purchase order number" & "Material" tidak ditemukan.');
   }
 
   // ── Step 2: Baca Template A (Odoo) ─────────────────────────────────────────
   const odooBuf = await readBuffer(odooFile);
   let odooRows: any[] = [];
-
   const ext = odooFile.name.split('.').pop()?.toLowerCase();
 
   if (ext === 'csv') {
-    // Parse CSV
     const wbOdoo = XLSX.read(odooBuf, { type: 'array' });
     odooRows = XLSX.utils.sheet_to_json(wbOdoo.Sheets[wbOdoo.SheetNames[0]], { raw: false });
   } else {
-    // XLSX / XLS
     const wbOdoo = XLSX.read(odooBuf, { type: 'array', cellDates: true });
     odooRows = XLSX.utils.sheet_to_json(wbOdoo.Sheets[wbOdoo.SheetNames[0]], { raw: false });
   }
 
-  if (odooRows.length === 0) throw new Error('File Odoo (Template A) kosong atau tidak bisa dibaca.');
+  if (odooRows.length === 0) throw new Error('File Odoo kosong/tidak terbaca.');
 
   const cols = Object.keys(odooRows[0]);
+  const colId = cols.find(c => c === 'id') ?? cols.find(c => c.toUpperCase().includes('EXTERNAL') && c.toUpperCase().includes('ID')) ?? cols[0];
+  const colOrderId = cols.find(c => c === 'order_id') ?? cols.find(c => c.toUpperCase().includes('ORDER') && c.toUpperCase().includes('ID')) ?? cols.find(c => c.toUpperCase().includes('ORDER'));
+  const colProdId = cols.find(c => c === 'product_id') ?? cols.find(c => c.toUpperCase().includes('PRODUCT') && c.toUpperCase().includes('ID')) ?? cols.find(c => c.toUpperCase().includes('PRODUCT'));
 
-  // Deteksi kolom Odoo:
-  // "id" — External ID Odoo, wajib ada
-  const colId = cols.find(c => c === 'id')
-    ?? cols.find(c => c.toUpperCase().includes('EXTERNAL') && c.toUpperCase().includes('ID'))
-    ?? cols[0];
+  if (!colOrderId || !colProdId) throw new Error('Kolom order_id atau product_id tidak ditemukan di Odoo.');
 
-  // "order_id" — nomor PO Odoo, di-match ke "Purchase order number" SOT
-  const colOrderId = cols.find(c => c === 'order_id')
-    ?? cols.find(c => c.toUpperCase().includes('ORDER') && c.toUpperCase().includes('ID'))
-    ?? cols.find(c => c.toUpperCase().includes('ORDER'));
-
-  // "product_id" — kode material, di-match ke "Material" SOT
-  const colProdId = cols.find(c => c === 'product_id')
-    ?? cols.find(c => c.toUpperCase().includes('PRODUCT') && c.toUpperCase().includes('ID'))
-    ?? cols.find(c => c.toUpperCase().includes('PRODUCT'));
-
-  log({ type: 'info', msg: `Odoo: ${odooRows.length} baris | id="${colId}" | order_id="${colOrderId ?? '—'}" | product_id="${colProdId ?? '—'}"` });
-  const sampleProduct = String(odooRows[0]?.[colProdId] ?? '').trim();
-const sampleTrimmed = sampleProduct.replace(/^[A-Za-z]+\s+/, '').trim();
-
-log({
-  type: 'info',
-  msg: `Pre-processing product_id aktif: "${sampleProduct}" -> "${sampleTrimmed}"`
-});
-
-  if (!colOrderId) throw new Error(`Kolom order_id tidak ditemukan. Kolom tersedia: [${cols.join(', ')}]`);
-  if (!colProdId)  throw new Error(`Kolom product_id tidak ditemukan. Kolom tersedia: [${cols.join(', ')}]`);
-
-  // ── Step 3-5: Loop, skip BIAYA, VLOOKUP, bangun output ─────────────────────
-  let matched = 0, noMatch = 0, skipped = 0;
+  // ── Step 3: Loop, Filter, & Build Output ───────────────────────────────────
+  let matched = 0, noMatch = 0, skippedBiaya = 0, skippedTBD = 0;
   const result: any[] = [];
   const noMatchKeys: string[] = [];
 
   for (const row of odooRows) {
+    const orderVal = String(row[colOrderId] ?? '').trim();
+    const rawProdVal = String(row[colProdId] ?? '').trim();
 
-  const orderVal = String(row[colOrderId] ?? '').trim();
+    // Skip BIAYA
+    if (rawProdVal.toUpperCase().includes('BIAYA')) {
+      skippedBiaya++;
+      continue;
+    }
 
-  // Nilai asli product_id dari Template A
-  const rawProdVal = String(row[colProdId] ?? '').trim();
-
-  // Skip BIAYA sebelum trimming
-  if (rawProdVal.toUpperCase().includes('BIAYA')) {
-    skipped++;
-    continue;
-  }
-
-  // Hapus prefix material:
-  // FI 8890CN -> 8890CN
-  // QSP T112NXLRL-Q -> T112NXLRL-Q
-  // MBP 7010-CS -> 7010-CS
-  const prodVal = rawProdVal.replace(/^[A-Za-z]+\s+/, '').trim();
-
-  // Matching menggunakan product_id yang sudah dipangkas
-  const cleanOrder = superclean(orderVal);
-  const cleanProd  = superclean(prodVal);
+    const prodVal = rawProdVal.replace(/^[A-Za-z]+\s+/, '').trim();
+    const cleanOrder = superclean(orderVal);
+    const cleanProd  = superclean(prodVal);
 
     let hit = sotIndex[cleanOrder + '__' + cleanProd];
 
-    // Fallback: order_id di Odoo prefix "P-" → coba strip prefix P angka-angka
     if (!hit) {
-      // Ambil hanya angka dari order_id (misal "P-2611626" → "2611626")
       const numericOrder = orderVal.replace(/[^0-9]/g, '');
-      if (numericOrder) {
-        hit = sotIndex[superclean(numericOrder) + '__' + cleanProd];
-      }
+      if (numericOrder) hit = sotIndex[superclean(numericOrder) + '__' + cleanProd];
     }
 
-    if (hit) {
-      matched++;
-    } else {
+    // ── ATURAN 1: Kalau tidak match PO/Material, JANGAN diproses
+    if (!hit) {
       noMatch++;
-      if (noMatchKeys.length < 10) {
-  noMatchKeys.push(
-    `order="${orderVal}" product="${rawProdVal}" -> "${prodVal}"`
-  );
-}
+      if (noMatchKeys.length < 5) noMatchKeys.push(`PO:${orderVal} | Mat:${prodVal}`);
+      continue; 
     }
 
+    const estReceivedDate = hit.estimated_received ?? '';
+
+    // ── ATURAN 2: Kalau estimated_received isinya TBD, JANGAN diproses
+    if (estReceivedDate.toUpperCase().includes('TBD')) {
+      skippedTBD++;
+      continue;
+    }
+
+    matched++;
     result.push({
       'id':                 String(row[colId] ?? '').trim(),
-      'status':             hit?.status             ?? '',
-      'item_status':        hit?.item_status        ?? '',
-      'estimated_received': hit?.estimated_received ?? '',
-      'remarks':            hit?.remarks            ?? '',
+      'status':             hit.status             ?? '',
+      'item_status':        hit.item_status        ?? '',
+      'estimated_received': estReceivedDate,
+      'remarks':            hit.remarks            ?? '',
     });
   }
 
   log({
     type: matched > 0 ? 'success' : 'warn',
-    msg:  `Hasil: ✓ ${matched} cocok | ✗ ${noMatch} tidak ditemukan di SOT | ⊘ ${skipped} baris BIAYA dilewati`,
+    msg:  `✓ ${matched} diexport | ✗ ${noMatch} PO tak match (di-skip) | ⊘ ${skippedBiaya} BIAYA | ⊘ ${skippedTBD} TBD (di-skip)`,
   });
 
   if (noMatch > 0 && noMatchKeys.length > 0) {
-    log({ type: 'warn', msg: `Contoh tidak cocok: ${noMatchKeys.slice(0, 5).join(' | ')}` });
-    log({ type: 'info', msg: `Tip: Pastikan nomor PO di Odoo (order_id) cocok dengan kolom "Purchase order number" di SOT.` });
+    log({ type: 'warn', msg: `Sample PO yg tidak match & dibuang: ${noMatchKeys.join(', ')}` });
   }
 
-  log({ type: 'success', msg: `${result.length} baris siap diexport sebagai Template C (siap import Odoo)!` });
+  if (matched === 0) throw new Error('Tidak ada data yang cocok untuk di-export.');
 
   // ── Export Template C ───────────────────────────────────────────────────────
-  // Kolom output: id, status, item_status, estimated_received, remarks
   const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.json_to_sheet(result, {
-    header: ['id', 'status', 'item_status', 'estimated_received', 'remarks'],
-  });
-
-  // Set lebar kolom agar nyaman dibaca
-  ws['!cols'] = [
-    { wch: 48 }, // id
-    { wch: 30 }, // status
-    { wch: 20 }, // item_status
-    { wch: 22 }, // estimated_received
-    { wch: 40 }, // remarks
-  ];
-
+  const ws = XLSX.utils.json_to_sheet(result, { header: ['id', 'status', 'item_status', 'estimated_received', 'remarks'] });
+  ws['!cols'] = [{ wch: 48 }, { wch: 30 }, { wch: 20 }, { wch: 22 }, { wch: 40 }];
   XLSX.utils.book_append_sheet(wb, ws, 'SIAP_IMPORT');
   const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
   return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
@@ -389,8 +299,6 @@ export default function App() {
       `}</style>
 
       <div style={{ position: 'relative', zIndex: 1, maxWidth: 960, margin: '0 auto', padding: '48px 24px 80px' }}>
-
-        {/* Header */}
         <div style={{ textAlign: 'center', marginBottom: 56 }}>
           <div style={{
             display: 'inline-flex', alignItems: 'center', gap: 6,
@@ -412,28 +320,22 @@ export default function App() {
           </p>
         </div>
 
-        {/* Grid */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(300px,1fr))', gap: 20 }}>
-
-          {/* Left: Upload */}
           <div>
             <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 28 }}>
               <p style={{ fontSize: 11, fontFamily: 'var(--mono)', letterSpacing: '.12em', color: 'var(--muted)', textTransform: 'uppercase', marginBottom: 20 }}>// Upload Files</p>
-
               <Dropzone
                 label="01 — Template A · Tarikan Odoo (CSV / XLSX)"
                 sublabel=".csv · .xlsx · .xls  |  Wajib ada kolom: id, order_id, product_id"
                 file={odooFile} accept=".csv,.xlsx,.xls" icon="📄"
                 onFile={f => { setOdooFile(f); setStatus('idle'); setLogs([]); }}
               />
-
               <Dropzone
                 label="02 — Template B · File SOT (XLSX)"
                 sublabel=".xlsx · .xls  |  Semua sheet di-scan otomatis"
                 file={sotFile} accept=".xlsx,.xls" icon="📊"
                 onFile={f => { setSotFile(f); setStatus('idle'); setLogs([]); }}
               />
-
               <button
                 onClick={handleConvert}
                 disabled={!odooFile || !sotFile || status === 'processing'}
@@ -451,7 +353,6 @@ export default function App() {
                   ? <><span style={{ animation: 'spin .8s linear infinite', display: 'inline-block' }}>⟳</span> Processing…</>
                   : <><span>↓</span> Convert & Download Template C</>}
               </button>
-
               {status === 'done' && (
                 <div style={{ marginTop: 14, padding: '12px 16px', borderRadius: 10, fontSize: 13,
                   background: 'rgba(16,185,129,.1)', border: '1px solid rgba(16,185,129,.25)', color: 'var(--green)' }}>
@@ -465,8 +366,6 @@ export default function App() {
                 </div>
               )}
             </div>
-
-            {/* Log */}
             {logs.length > 0 && (
               <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 28, marginTop: 16 }}>
                 <p style={{ fontSize: 11, fontFamily: 'var(--mono)', letterSpacing: '.12em', color: 'var(--muted)', textTransform: 'uppercase', marginBottom: 16 }}>// Processing Log</p>
@@ -478,17 +377,13 @@ export default function App() {
               </div>
             )}
           </div>
-
-          {/* Right: Info */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-
-            {/* Panduan */}
             <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 28 }}>
               <p style={{ fontSize: 11, fontFamily: 'var(--mono)', letterSpacing: '.12em', color: 'var(--muted)', textTransform: 'uppercase', marginBottom: 20 }}>// Panduan</p>
               {[
                 ['Template A (Odoo)', 'Export Purchase Order Lines dari Odoo dalam format CSV atau XLSX. Wajib ada kolom: id, order_id, product_id.'],
                 ['Template B (SOT)', 'File SOT terbaru (semua sheet di-scan otomatis). Butuh kolom "Purchase order number" & "Material" sebagai kunci matching.'],
-                ['Convert & Download', 'VLOOKUP order_id ↔ Purchase order number, product_id ↔ Material. Otomatis isi 4 kolom. Baris BIAYA dilewati. Hasil = Template C siap import Odoo.'],
+                ['Convert & Download', 'VLOOKUP order_id ↔ Purchase order number, product_id ↔ Material. Data yg tidak ada di SOT dan yg statusnya TBD akan di-skip otomatis.'],
               ].map(([title, desc], i) => (
                 <div key={i} style={{ display: 'flex', gap: 12, marginBottom: 14, alignItems: 'flex-start' }}>
                   <span style={{
@@ -503,8 +398,6 @@ export default function App() {
                 </div>
               ))}
             </div>
-
-            {/* Mapping Kolom */}
             <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 28 }}>
               <p style={{ fontSize: 11, fontFamily: 'var(--mono)', letterSpacing: '.12em', color: 'var(--muted)', textTransform: 'uppercase', marginBottom: 20 }}>// Mapping Kolom</p>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, fontFamily: 'var(--mono)' }}>
@@ -517,7 +410,7 @@ export default function App() {
                     ['→ est. received',  '← ESTIMATED RECEIVED BY DEALERS'],
                     ['→ remarks',        '← REMARKS'],
                     ['Output (C)',       'id · status · item_status · est_received · remarks'],
-                    ['Skip',            'Baris product_id mengandung "BIAYA"'],
+                    ['Skip',            'Baris BIAYA, PO tidak match, & TBD'],
                   ].map(([k, v]) => (
                     <tr key={k}>
                       <td style={{ padding: '7px 0', borderBottom: '1px solid var(--border)', color: 'var(--muted)', whiteSpace: 'nowrap', paddingRight: 12 }}>{k}</td>
@@ -527,8 +420,6 @@ export default function App() {
                 </tbody>
               </table>
             </div>
-
-            {/* Output Preview */}
             <div style={{ background: 'var(--surface)', border: '1px solid rgba(16,185,129,.2)', borderRadius: 16, padding: 28 }}>
               <p style={{ fontSize: 11, fontFamily: 'var(--mono)', letterSpacing: '.12em', color: 'var(--green)', textTransform: 'uppercase', marginBottom: 16 }}>// Output Template C</p>
               <p style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.7, fontFamily: 'var(--mono)' }}>
@@ -543,7 +434,6 @@ export default function App() {
             </div>
           </div>
         </div>
-
         <p style={{ textAlign: 'center', marginTop: 56, fontSize: 11, color: 'var(--muted)', fontFamily: 'var(--mono)', letterSpacing: '.08em' }}>
           SERVING YOU BETTER · CREATED BY IT TEAM ELOKARSA · 2026
         </p>

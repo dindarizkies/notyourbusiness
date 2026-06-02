@@ -163,10 +163,13 @@ async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Pr
 
     const estReceivedDate = hit.estimated_received ?? '';
 
-    // 3. SKIP TANGGAL YANG ADA TULISAN "TBD"
-    if (estReceivedDate.toUpperCase().includes('TBD')) {
-      skippedTBD++;
-      continue;
+    // 3. FILTER VALIDASI: Hanya loloskan jika formatnya DATE (YYYY-MM-DD)
+    const isFormatDate = /^\d{4}-\d{2}-\d{2}$/.test(estReceivedDate);
+    if (!isFormatDate) {
+      if (estReceivedDate.toUpperCase().includes('TBD')) {
+        skippedTBD++;
+      }
+      continue; // Langsung skip semua yang bukan format tanggal valid (termasuk TBD, kosong, dll)
     }
 
     // JIKA LOLOS SEMUA FILTER, MASUKKAN KE RESULT

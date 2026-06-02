@@ -6,23 +6,18 @@ interface Log { type: 'info' | 'warn' | 'success' | 'error'; msg: string; }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// Uppercase + hapus spasi dan karakter non-alphanumeric → untuk fuzzy matching
 const superclean = (val: any): string =>
   String(val ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
-// Format tanggal Excel serial number atau Date object ke string "YYYY-MM-DD"
 const formatDate = (val: any): string => {
   if (!val) return '';
-  // Sudah string → kembalikan langsung
   if (typeof val === 'string') return val.trim();
-  // Date object (openpyxl / SheetJS kadang parse otomatis)
   if (val instanceof Date) {
     const y = val.getFullYear();
     const m = String(val.getMonth() + 1).padStart(2, '0');
     const d = String(val.getDate()).padStart(2, '0');
     return `${y}-${m}-${d}`;
   }
-  // Excel serial number (SheetJS dengan raw:true)
   if (typeof val === 'number') {
     const date = XLSX.SSF.parse_date_code(val);
     if (date) {
@@ -46,7 +41,7 @@ const readBuffer = (file: File): Promise<ArrayBuffer> =>
 // ─── Konversi ─────────────────────────────────────────────────────────────────
 async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Promise<Blob> {
 
-  // ── Step 1: Baca SOT → bangun index ────────────────────────────────────────
+  // ── Step 1: Baca SOT ──
   const sotBuf = await readBuffer(sotFile);
   const wbSot  = XLSX.read(sotBuf, { type: 'array', cellDates: true });
 
@@ -109,7 +104,7 @@ async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Pr
     throw new Error('File SOT kosong atau kolom "Purchase order number" & "Material" tidak ditemukan.');
   }
 
-  // ── Step 2: Baca Template A (Odoo) ─────────────────────────────────────────
+  // ── Step 2: Baca Odoo ──
   const odooBuf = await readBuffer(odooFile);
   let odooRows: any[] = [];
   const ext = odooFile.name.split('.').pop()?.toLowerCase();
@@ -131,7 +126,7 @@ async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Pr
 
   if (!colOrderId || !colProdId) throw new Error('Kolom order_id atau product_id tidak ditemukan di Odoo.');
 
-  // ── Step 3: Loop, Filter, & Build Output ───────────────────────────────────
+  // ── Step 3: Looping & Filtering ──
   let matched = 0, noMatch = 0, skippedBiaya = 0, skippedTBD = 0;
   const result: any[] = [];
   const noMatchKeys: string[] = [];
@@ -140,7 +135,7 @@ async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Pr
     const orderVal = String(row[colOrderId] ?? '').trim();
     const rawProdVal = String(row[colProdId] ?? '').trim();
 
-    // Skip BIAYA
+    // 1. SKIP BIAYA
     if (rawProdVal.toUpperCase().includes('BIAYA')) {
       skippedBiaya++;
       continue;
@@ -154,10 +149,12 @@ async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Pr
 
     if (!hit) {
       const numericOrder = orderVal.replace(/[^0-9]/g, '');
-      if (numericOrder) hit = sotIndex[superclean(numericOrder) + '__' + cleanProd];
+      if (numericOrder) {
+        hit = sotIndex[superclean(numericOrder) + '__' + cleanProd];
+      }
     }
 
-    // ── ATURAN 1: Kalau tidak match PO/Material, JANGAN diproses
+    // 2. SKIP PO YANG TIDAK MATCH
     if (!hit) {
       noMatch++;
       if (noMatchKeys.length < 5) noMatchKeys.push(`PO:${orderVal} | Mat:${prodVal}`);
@@ -166,12 +163,13 @@ async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Pr
 
     const estReceivedDate = hit.estimated_received ?? '';
 
-    // ── ATURAN 2: Kalau estimated_received isinya TBD, JANGAN diproses
+    // 3. SKIP TANGGAL YANG ADA TULISAN "TBD"
     if (estReceivedDate.toUpperCase().includes('TBD')) {
       skippedTBD++;
       continue;
     }
 
+    // JIKA LOLOS SEMUA FILTER, MASUKKAN KE RESULT
     matched++;
     result.push({
       'id':                 String(row[colId] ?? '').trim(),
@@ -184,7 +182,7 @@ async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Pr
 
   log({
     type: matched > 0 ? 'success' : 'warn',
-    msg:  `✓ ${matched} diexport | ✗ ${noMatch} PO tak match (di-skip) | ⊘ ${skippedBiaya} BIAYA | ⊘ ${skippedTBD} TBD (di-skip)`,
+    msg:  `✓ ${matched} diexport | ✗ ${noMatch} PO tak match | ⊘ ${skippedBiaya} BIAYA | ⊘ ${skippedTBD} TBD (di-skip)`,
   });
 
   if (noMatch > 0 && noMatchKeys.length > 0) {
@@ -193,7 +191,7 @@ async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Pr
 
   if (matched === 0) throw new Error('Tidak ada data yang cocok untuk di-export.');
 
-  // ── Export Template C ───────────────────────────────────────────────────────
+  // ── Export Template C ──
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.json_to_sheet(result, { header: ['id', 'status', 'item_status', 'estimated_received', 'remarks'] });
   ws['!cols'] = [{ wch: 48 }, { wch: 30 }, { wch: 20 }, { wch: 22 }, { wch: 40 }];

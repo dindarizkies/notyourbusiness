@@ -161,31 +161,26 @@ async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Pr
       continue; 
     }
 
-    const estReceivedDate = hit.estimated_received ?? '';
+    const rawEst = hit.estimated_received ?? '';
 
-    // 3. FILTER VALIDASI: Hanya loloskan jika formatnya DATE (YYYY-MM-DD)
-    const isFormatDate = /^\d{4}-\d{2}-\d{2}$/.test(estReceivedDate);
-    if (!isFormatDate) {
-      if (estReceivedDate.toUpperCase().includes('TBD')) {
-        skippedTBD++;
-      }
-      continue; // Langsung skip semua yang bukan format tanggal valid (termasuk TBD, kosong, dll)
-    }
+    // 3. Validasi format tanggal — kalau bukan YYYY-MM-DD (misal TBD, kosong, dll)
+    //    baris tetap masuk output tapi estimated_received dikosongkan
+    const isValidDate = /^\d{4}-\d{2}-\d{2}$/.test(rawEst);
+    if (!isValidDate && rawEst.toUpperCase().includes('TBD')) skippedTBD++;
 
-    // JIKA LOLOS SEMUA FILTER, MASUKKAN KE RESULT
     matched++;
     result.push({
       'id':                 String(row[colId] ?? '').trim(),
       'status':             hit.status             ?? '',
       'item_status':        hit.item_status        ?? '',
-      'estimated_received': estReceivedDate,
+      'estimated_received': isValidDate ? rawEst : '',
       'remarks':            hit.remarks            ?? '',
     });
   }
 
   log({
     type: matched > 0 ? 'success' : 'warn',
-    msg:  `✓ ${matched} diexport | ✗ ${noMatch} PO tak match | ⊘ ${skippedBiaya} BIAYA | ⊘ ${skippedTBD} TBD (di-skip)`,
+    msg:  `✓ ${matched} diexport | ✗ ${noMatch} PO tak match | ⊘ ${skippedBiaya} BIAYA dilewati | ⊘ ${skippedTBD} TBD (est. dikosongkan)`,
   });
 
   if (noMatch > 0 && noMatchKeys.length > 0) {

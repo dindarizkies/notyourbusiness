@@ -39,20 +39,20 @@ const readBuffer = (file: File): Promise<ArrayBuffer> =>
   });
 
 // ─── Konversi ─────────────────────────────────────────────────────────────────
-async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Promise<Blob> {
+async function convert(odooFile: File, potFile: File, log: (l: Log) => void): Promise<Blob> {
 
-  // ── Step 1: Baca SOT ──
-  const sotBuf = await readBuffer(sotFile);
-  const wbSot  = XLSX.read(sotBuf, { type: 'array', cellDates: true });
+  // ── Step 1: Baca POT ──
+  const potBuf = await readBuffer(potFile);
+  const wbPot  = XLSX.read(potBuf, { type: 'array', cellDates: true });
 
-  const sotIndex: Record<string, {
+  const potIndex: Record<string, {
     status: string; item_status: string; estimated_received: string; remarks: string;
   }> = {};
 
-  let sotRows = 0;
+  let potRows = 0;
 
-  for (const sheetName of wbSot.SheetNames) {
-    const rows: any[] = XLSX.utils.sheet_to_json(wbSot.Sheets[sheetName], { raw: false });
+  for (const sheetName of wbPot.SheetNames) {
+    const rows: any[] = XLSX.utils.sheet_to_json(wbPot.Sheets[sheetName], { raw: false });
     if (rows.length === 0) continue;
 
     const cols = Object.keys(rows[0]);
@@ -83,25 +83,25 @@ async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Pr
 
       const key = superclean(po) + '__' + superclean(mat);
 
-      if (!sotIndex[key]) {
+      if (!potIndex[key]) {
         const rawStatus = colStatus ? String(row[colStatus] ?? '').trim() : '';
         const statusVal = rawStatus || sheetName;
 
-        sotIndex[key] = {
+        potIndex[key] = {
           status:             statusVal,
           item_status:        colIStatus ? String(row[colIStatus] ?? '').trim() : '',
           estimated_received: colEst     ? formatDate(row[colEst])              : '',
           remarks:            colRemarks ? String(row[colRemarks] ?? '').trim() : '',
         };
       }
-      sotRows++;
+      potRows++;
     }
   }
 
-  log({ type: 'info', msg: `SOT selesai: ${sotRows} baris diproses | ${Object.keys(sotIndex).length} kombinasi unik.` });
+  log({ type: 'info', msg: `POT selesai: ${potRows} baris diproses | ${Object.keys(potIndex).length} kombinasi unik.` });
 
-  if (sotRows === 0) {
-    throw new Error('File SOT kosong atau kolom "Purchase order number" & "Material" tidak ditemukan.');
+  if (potRows === 0) {
+    throw new Error('File POT kosong atau kolom "Purchase order number" & "Material" tidak ditemukan.');
   }
 
   // ── Step 2: Baca Odoo ──
@@ -145,12 +145,12 @@ async function convert(odooFile: File, sotFile: File, log: (l: Log) => void): Pr
     const cleanOrder = superclean(orderVal);
     const cleanProd  = superclean(prodVal);
 
-    let hit = sotIndex[cleanOrder + '__' + cleanProd];
+    let hit = potIndex[cleanOrder + '__' + cleanProd];
 
     if (!hit) {
       const numericOrder = orderVal.replace(/[^0-9]/g, '');
       if (numericOrder) {
-        hit = sotIndex[superclean(numericOrder) + '__' + cleanProd];
+        hit = potIndex[superclean(numericOrder) + '__' + cleanProd];
       }
     }
 
@@ -245,7 +245,7 @@ function Dropzone({ label, sublabel, file, accept, onFile, icon }: {
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [odooFile, setOdooFile] = useState<File | null>(null);
-  const [sotFile,  setSotFile]  = useState<File | null>(null);
+  const [potFile,  setPotFile]  = useState<File | null>(null);
   const [status,   setStatus]   = useState<'idle' | 'processing' | 'done' | 'error'>('idle');
   const [logs,     setLogs]     = useState<Log[]>([]);
   const [errMsg,   setErrMsg]   = useState('');
@@ -253,10 +253,10 @@ export default function App() {
   const addLog = (l: Log) => setLogs(p => [...p, l]);
 
   const handleConvert = async () => {
-    if (!odooFile || !sotFile) return;
+    if (!odooFile || !potFile) return;
     setStatus('processing'); setLogs([]); setErrMsg('');
     try {
-      const blob = await convert(odooFile, sotFile, addLog);
+      const blob = await convert(odooFile, potFile, addLog);
       const url  = URL.createObjectURL(blob);
       const a    = document.createElement('a');
       a.href = url; a.download = 'SIAP_IMPORT_ODOO_FINAL.xlsx';
@@ -307,11 +307,11 @@ export default function App() {
             🚀 Auto-Convert Engine · ELO KARSA
           </div>
           <h1 style={{ fontSize: 'clamp(28px,5vw,48px)', fontWeight: 800, letterSpacing: '-.02em', lineHeight: 1.1 }}>
-            Odoo × SOT <span style={{ color: 'var(--accent)' }}>Smart-Sync</span>
+            Odoo × POT <span style={{ color: 'var(--accent)' }}>Smart-Sync</span>
           </h1>
           <p style={{ marginTop: 14, color: 'var(--muted)', fontSize: 15, lineHeight: 1.6 }}>
             Upload <strong style={{ color: 'var(--text)' }}>Template A</strong> (tarikan Odoo) +{' '}
-            <strong style={{ color: 'var(--text)' }}>Template B</strong> (SOT) → otomatis generate{' '}
+            <strong style={{ color: 'var(--text)' }}>Template B</strong> (POT) → otomatis generate{' '}
             <strong style={{ color: 'var(--green)' }}>Template C</strong> siap import kembali ke Odoo.
           </p>
         </div>
@@ -327,21 +327,21 @@ export default function App() {
                 onFile={f => { setOdooFile(f); setStatus('idle'); setLogs([]); }}
               />
               <Dropzone
-                label="02 — Template B · File SOT (XLSX)"
+                label="02 — Template B · File POT (XLSX)"
                 sublabel=".xlsx · .xls  |  Semua sheet di-scan otomatis"
-                file={sotFile} accept=".xlsx,.xls" icon="📊"
-                onFile={f => { setSotFile(f); setStatus('idle'); setLogs([]); }}
+                file={potFile} accept=".xlsx,.xls" icon="📊"
+                onFile={f => { setPotFile(f); setStatus('idle'); setLogs([]); }}
               />
               <button
                 onClick={handleConvert}
-                disabled={!odooFile || !sotFile || status === 'processing'}
+                disabled={!odooFile || !potFile || status === 'processing'}
                 style={{
                   width: '100%', padding: 15, border: 'none', borderRadius: 12, marginTop: 8,
                   background: 'linear-gradient(135deg,var(--accent),var(--accent2))',
                   color: '#fff', fontFamily: 'var(--sans)', fontSize: 14, fontWeight: 700,
                   letterSpacing: '.04em', textTransform: 'uppercase', cursor: 'pointer',
                   display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
-                  opacity: (!odooFile || !sotFile || status === 'processing') ? .4 : 1,
+                  opacity: (!odooFile || !potFile || status === 'processing') ? .4 : 1,
                   boxShadow: '0 4px 24px rgba(59,130,246,.3)', transition: 'all .2s',
                 }}
               >
@@ -378,8 +378,8 @@ export default function App() {
               <p style={{ fontSize: 11, fontFamily: 'var(--mono)', letterSpacing: '.12em', color: 'var(--muted)', textTransform: 'uppercase', marginBottom: 20 }}>// Panduan</p>
               {[
                 ['Template A (Odoo)', 'Export Purchase Order Lines dari Odoo dalam format CSV atau XLSX. Wajib ada kolom: id, order_id, product_id.'],
-                ['Template B (SOT)', 'File SOT terbaru (semua sheet di-scan otomatis). Butuh kolom "Purchase order number" & "Material" sebagai kunci matching.'],
-                ['Convert & Download', 'VLOOKUP order_id ↔ Purchase order number, product_id ↔ Material. Data yg tidak ada di SOT dan yg statusnya TBD akan di-skip otomatis.'],
+                ['Template B (POT)', 'File POT terbaru (semua sheet di-scan otomatis). Butuh kolom "Purchase order number" & "Material" sebagai kunci matching.'],
+                ['Convert & Download', 'VLOOKUP order_id ↔ Purchase order number, product_id ↔ Material. Data yg tidak ada di POT dan yg statusnya TBD akan di-skip otomatis.'],
               ].map(([title, desc], i) => (
                 <div key={i} style={{ display: 'flex', gap: 12, marginBottom: 14, alignItems: 'flex-start' }}>
                   <span style={{
@@ -401,7 +401,7 @@ export default function App() {
                   {[
                     ['Template A key',   'order_id  +  product_id'],
                     ['Template B key',   'Purchase order number  +  Material'],
-                    ['→ status',         '← Status (nama sheet SOT)'],
+                    ['→ status',         '← Status (nama sheet POT)'],
                     ['→ item_status',    '← ITEM STATUS'],
                     ['→ est. received',  '← ESTIMATED RECEIVED BY DEALERS'],
                     ['→ remarks',        '← REMARKS'],
